@@ -678,6 +678,236 @@ int main(int argc, char **argv)
 		                                 QStringLiteral("x")).isEmpty());
 	}
 
+	/* ---------------- 单份头文件：格式金样 ----------------
+	 * renderHeader 为了和「多份打包」共用代码，内部拆成了几个小函数。
+	 * 拆分最容易出的错是"输出悄悄变了"：多一个空格、少一行注释，用户那边的
+	 * diff 就是上百行。这三份是拆分**之前**生成的，逐字节比。 */
+	{
+		const QString dir = QDir(QCoreApplication::applicationDirPath())
+		                        .absoluteFilePath(QStringLiteral("fixture"));
+		auto slurp = [](const QString &p) {
+			QFile f(p);
+			if (!f.open(QIODevice::ReadOnly))
+			{
+				return QString();
+			}
+			QString t = QString::fromUtf8(f.readAll());
+			f.close();
+			/* 金样是以 QIODevice::Text 写出来的，Windows 上是 CRLF */
+			return t.replace(QStringLiteral("\r\n"), QStringLiteral("\n"));
+		};
+
+		ImageGen::Options o64;
+		o64.width     = 128;
+		o64.height    = 64;
+		o64.threshold = 128;
+		o64.dither    = ImageGen::Bayer;
+
+		QVector<QVector<quint8>> one;
+		QVector<quint8> f(ImageGen::bytesPerFrame(128, 64));
+		for (int i = 0; i < f.size(); ++i)
+		{
+			f[i] = quint8((i * 37 + 11) & 0xFF);
+		}
+		one.append(f);
+
+		const QString gSingle = slurp(QDir(dir).absoluteFilePath(
+		    QStringLiteral("header_golden_single.h")));
+		const QString gIdent = slurp(QDir(dir).absoluteFilePath(
+		    QStringLiteral("header_golden_ident.h")));
+		const QString gDedup = slurp(QDir(dir).absoluteFilePath(
+		    QStringLiteral("header_golden_dedup.h")));
+		check("金样读得进来（3 份都在）",
+		      !gSingle.isEmpty() && !gIdent.isEmpty() && !gDedup.isEmpty());
+
+		const QString gotSingle =
+		    ImageGen::renderHeader(one, o64, 0, QStringLiteral("logo.png"));
+		check("单帧 / 不带前缀：和拆分前逐字节一致", gotSingle == gSingle,
+		      QStringLiteral("%1 vs %2 字节").arg(gotSingle.size()).arg(gSingle.size()));
+
+		const QString gotIdent = ImageGen::renderHeader(one, o64, 120,
+		                                                QStringLiteral("logo.png"),
+		                                                QStringLiteral("logo"));
+		check("单帧 / 带前缀：和拆分前逐字节一致", gotIdent == gIdent,
+		      QStringLiteral("%1 vs %2 字节").arg(gotIdent.size()).arg(gIdent.size()));
+
+		ImageGen::Options o32;
+		o32.width     = 128;
+		o32.height    = 32;
+		o32.dither    = ImageGen::NoDither;
+		o32.threshold = 96;
+		QVector<QVector<quint8>> four;
+		for (int k = 0; k < 2; ++k)
+		{
+			QVector<quint8> g(ImageGen::bytesPerFrame(128, 32));
+			for (int i = 0; i < g.size(); ++i)
+			{
+				g[i] = quint8((i * (k + 3) + 7) & 0xFF);
+			}
+			four.append(g);
+		}
+		four.append(four.at(0));
+		four.append(four.at(1));
+		const QString gotDedup = ImageGen::renderHeader(four, o32, 80,
+		                                                QStringLiteral("blink.gif"),
+		                                                QStringLiteral("blink"));
+		check("去重 + 带前缀：和拆分前逐字节一致", gotDedup == gDedup,
+		      QStringLiteral("%1 vs %2 字节").arg(gotDedup.size()).arg(gDedup.size()));
+	}
+
+	/* ---------------- 多份素材写进一个 .h（各存各的，不合成动画） ----------------
+	 * 用户的真实需求：一次导入好几张图，想要**一个**头文件，但不是一段动画，
+	 * 而是各自独立的数组，而且点阵上方要能看出它当初是从哪个文件来的。 */
+	{
+		ImageGen::Asset a1;
+		a1.ident      = QStringLiteral("logo");
+		a1.sourceName = QStringLiteral("logo.png");
+		a1.opt.width  = 128;
+		a1.opt.height = 64;
+		a1.delayMs    = 100;
+		QVector<quint8> f1(ImageGen::bytesPerFrame(128, 64));
+		for (int i = 0; i < f1.size(); ++i)
+		{
+			f1[i] = quint8((i * 37 + 11) & 0xFF);
+		}
+		a1.frames.append(f1);
+
+		ImageGen::Asset a2;
+		a2.ident      = QStringLiteral("blink");
+		a2.sourceName = QStringLiteral("blink.gif");
+		a2.opt.width  = 128;
+		a2.opt.height = 32;
+		a2.opt.dither = ImageGen::NoDither;
+		a2.opt.threshold = 96;
+		a2.delayMs    = 80;
+		for (int k = 0; k < 2; ++k)
+		{
+			QVector<quint8> g(ImageGen::bytesPerFrame(128, 32));
+			for (int i = 0; i < g.size(); ++i)
+			{
+				g[i] = quint8((i * (k + 3) + 7) & 0xFF);
+			}
+			a2.frames.append(g);
+		}
+		a2.frames.append(a2.frames.at(0));      /* 重复帧 → 这一份自己会去重 */
+		a2.frames.append(a2.frames.at(1));
+
+		QVector<ImageGen::Asset> list;
+		list << a1 << a2;
+
+		const QString h = ImageGen::renderMultiHeader(list, QStringLiteral("assets.h"));
+		check("打包头文件非空", !h.isEmpty());
+
+		/* 各自一套名字，互不覆盖 */
+		check("两份素材各有自己的宏",
+		      h.contains(QStringLiteral("#define LOGO_WIDTH")) &&
+		          h.contains(QStringLiteral("#define BLINK_WIDTH")));
+		check("两份素材各有自己的数组",
+		      h.contains(QStringLiteral("const uint8_t Logo_Frames[LOGO_COUNT]")) &&
+		          h.contains(QStringLiteral("const uint8_t Blink_Frames[BLINK_DATA_COUNT]")));
+		check("两份素材各有自己的显示函数",
+		      h.contains(QStringLiteral("void Logo_ShowFrame(")) &&
+		          h.contains(QStringLiteral("void Blink_ShowFrame(")));
+
+		/* 关键：没有变成"一个动画"。老的单份写法里全是 ANIM_* / Anim_* */
+		check("没有拼成一段动画（ANIM_ 一个不剩）",
+		      !h.contains(QStringLiteral("ANIM_")) &&
+		          !h.contains(QStringLiteral("Anim_")),
+		      QStringLiteral("还能找到 ANIM_"));
+
+		/* 每份的帧数、尺寸各自独立 */
+		check("帧数各报各的",
+		      h.contains(QStringLiteral("#define LOGO_COUNT           1")) &&
+		          h.contains(QStringLiteral("#define BLINK_COUNT          4")));
+		check("去重只作用在自己那一份上",
+		      h.contains(QStringLiteral("#define BLINK_DATA_COUNT     2")) &&
+		          !h.contains(QStringLiteral("#define LOGO_DATA_COUNT")));
+
+		/* 适配区一份就够，不能每份素材各来一遍让用户改 N 次 */
+		check("适配区全文件只有一份",
+		      h.count(QStringLiteral("\n#define OLED_WRITE_CMD(c)")) == 1 &&
+		          h.count(QStringLiteral("\n#define OLED_WRITE_DATA(d)")) == 1 &&
+		          h.count(QStringLiteral("\n#define OLED_DELAY(ms)")) == 1);
+
+		/* include guard 跟着文件名走，两个素材包同时 include 也不会互相吃掉 */
+		check("guard 取自文件名（assets.h → __ASSETS_H）",
+		      h.contains(QStringLiteral("#ifndef __ASSETS_H")) &&
+		          h.contains(QStringLiteral("#endif /* __ASSETS_H */")));
+
+		/* 用户明确要的：点阵数据正上方写着导入时的文件名 */
+		check("点阵正上方写了导入时的文件名（logo）",
+		      h.contains(QStringLiteral("/* 点阵数据 —— Logo，导入自 logo.png */\n"
+		                                "const uint8_t Logo_Frames[")));
+		check("点阵正上方写了导入时的文件名（blink）",
+		      h.contains(QStringLiteral("/* 点阵数据 —— Blink，导入自 blink.gif */\n"
+		                                "const uint8_t Blink_Frames[")));
+		check("抬头里也有来源那行",
+		      h.contains(QStringLiteral("导入自  : logo.png")) &&
+		          h.contains(QStringLiteral("导入自  : blink.gif")));
+
+		/* 顺序跟着列表走 */
+		const int p1 = h.indexOf(QStringLiteral("素材 1/2：Logo"));
+		const int p2 = h.indexOf(QStringLiteral("素材 2/2：Blink"));
+		check("块顺序和列表一致", p1 >= 0 && p2 > p1,
+		      QStringLiteral("p1=%1 p2=%2").arg(p1).arg(p2));
+
+		/* 名称撞车：两份都叫 logo 也必须编得过（自动补 _2），而不是生成两份一样的宏 */
+		ImageGen::Asset dup = a2;
+		dup.ident = QStringLiteral("logo");
+		QVector<ImageGen::Asset> dupList;
+		dupList << a1 << dup;
+		const QString dh = ImageGen::renderMultiHeader(dupList, QStringLiteral("x.h"));
+		check("重名自动补 _2，不会生成两套一样的宏",
+		      dh.contains(QStringLiteral("#define LOGO_WIDTH")) &&
+		          dh.contains(QStringLiteral("#define LOGO_2_WIDTH")) &&
+		          dh.count(QStringLiteral("#define LOGO_WIDTH")) == 1);
+
+		/* 空帧素材直接跳过 —— 生成 [0][N] 的数组，C 里编不过 */
+		ImageGen::Asset empty;
+		empty.ident = QStringLiteral("nothing");
+		QVector<ImageGen::Asset> withEmpty;
+		withEmpty << a1 << empty << a2;
+		const QString eh = ImageGen::renderMultiHeader(withEmpty, QStringLiteral("y.h"));
+		check("空帧素材被跳过，也不影响其它两份",
+		      !eh.contains(QStringLiteral("Nothing_Frames")) &&
+		          eh.contains(QStringLiteral("素材 1/2：Logo")) &&
+		          eh.contains(QStringLiteral("素材 2/2：Blink")));
+
+		check("全都是空帧时返回空串（不生成编不过的文件）",
+		      ImageGen::renderMultiHeader(QVector<ImageGen::Asset>() << empty).isEmpty());
+
+		/* 不给文件名时的兜底 guard */
+		check("没给文件名时 guard 退回 __OLED_ASSETS_H",
+		      ImageGen::renderMultiHeader(list).contains(
+		          QStringLiteral("#ifndef __OLED_ASSETS_H")));
+
+		/* 写盘 */
+		const QString packPath = QDir(outDir).absoluteFilePath(QStringLiteral("assets_pack.h"));
+		const QString perr = ImageGen::writeMultiHeaderFile(packPath, list,
+		                                                    QStringLiteral("assets_pack.h"));
+		check("打包写盘成功时返回空", perr.isEmpty(), perr);
+
+		QFile pf(packPath);
+		QString pw;
+		if (pf.open(QIODevice::ReadOnly))
+		{
+			pw = QString::fromUtf8(pf.readAll());
+			pf.close();
+		}
+		check("写出来的就是 renderMultiHeader 的结果",
+		      !pw.isEmpty() &&
+		          pw.replace(QStringLiteral("\r\n"), QStringLiteral("\n")) ==
+		              ImageGen::renderMultiHeader(list, QStringLiteral("assets_pack.h")));
+		check("写出来的文件里带文件名注释",
+		      pw.contains(QStringLiteral("导入自 logo.png")));
+		check("打包空路径被挡住",
+		      !ImageGen::writeMultiHeaderFile(QString(), list).isEmpty());
+		check("打包目录不存在时返回原因",
+		      !ImageGen::writeMultiHeaderFile(
+		           QDir(outDir).absoluteFilePath(QStringLiteral("nope/x.h")), list)
+		           .isEmpty());
+	}
+
 	/* ---------------- 写文本文件（三条导出路径共用） ----------------
 	 * 字库导出、自检帧、图片导出都是"生成一段文本 → 写进文件"，
 	 * 而且都踩过同一个坑：open() 成功就报"导出成功"，磁盘满时

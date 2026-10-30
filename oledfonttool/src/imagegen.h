@@ -97,6 +97,42 @@ public:
                                    const QString &ident = QString());
 
     /*
+     * 一份素材，给「多份打包进一个 .h」用。
+     *
+     * 比界面那边的 ImageAsset 少一半字段：列表名、原始帧、抽帧步长都是
+     * 界面的东西，导出时只要成品（packed）和它自己的取模参数。
+     */
+    struct Asset
+    {
+        QString                  ident;      /* 素材名 → 宏/函数前缀 */
+        QString                  sourceName; /* 导入时的文件名，写在点阵上方 */
+        QVector<QVector<quint8>> frames;     /* 显存字节 */
+        Options                  opt;
+        int                      delayMs = 100;
+    };
+
+    /*
+     * 把多份素材写进**同一个**头文件，每份各自独立 —— 不合成动画。
+     *
+     * 每份都有自己的 WIDTH / COUNT / Xxx_Frames / Xxx_ShowFrame()，
+     * 名字按素材名打头，互不影响；只有「适配区」（写命令 / 写数据 / 延时）
+     * 是全文件共用的一份，改一次就行。
+     *
+     * 每份的点阵数组正上方会注明导入时的文件名，隔了几天回来能认出来
+     * 哪个数组是哪张图。
+     *
+     * title（一般就是文件名）用来生成 include guard：assets.h → __ASSETS_H，
+     * 两份打包文件同时 include 也不会互相吃掉。为空时用 __OLED_ASSETS_H。
+     */
+    static QString renderMultiHeader(const QVector<Asset> &assets,
+                                     const QString &title = QString());
+
+    /* 同上的写盘版本 */
+    static QString writeMultiHeaderFile(const QString &path,
+                                        const QVector<Asset> &assets,
+                                        const QString &title = QString());
+
+    /*
      * 把任意字符串收拾成能当 C 标识符的名字：
      * 只留字母数字下划线，其余换成下划线，数字开头补前缀，空的话给个兜底。
      * "我的图标.png" 这类中文名过不了 C 编译器，必须有这一步。

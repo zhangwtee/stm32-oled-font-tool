@@ -691,6 +691,7 @@ private:
 	void recomputeImage();          /* 重新缩放+单色+打包，并刷新预览 */
 	void exportAnimHeader();        /* 导出当前素材 */
 	void exportAllAssets();         /* 每份素材各导一个 .h */
+	void exportAssetsToSingleFile(); /* 全部素材写进一个 .h，但各存各的 */
 	void togglePlayback();
 	void updateImageInfo();
 	ImageGen::Options imageOptions() const;
@@ -1351,6 +1352,12 @@ QWidget *MainWindow::buildImagePage()
 		"文件名和里面的宏、数组名都按素材名区分，可以同时 include 进一个工程。"));
 	sideLayout->addWidget(exportAllBtn);
 
+	QPushButton *exportPackBtn = new QPushButton(QStringLiteral("全部存进一个 .h…"), side);
+	exportPackBtn->setToolTip(QStringLiteral(
+		"把列表里所有素材写进同一个头文件，但每份仍然是独立的宏、数组和显示函数\n"
+		"（不合成一个动画）。每份点阵上方会注明导入时的文件名。"));
+	sideLayout->addWidget(exportPackBtn);
+
 	/* 右侧预览 */
 	m_imgPreview = new ImagePreview(this);
 	QScrollArea *scroll = new QScrollArea(this);
@@ -1373,6 +1380,7 @@ QWidget *MainWindow::buildImagePage()
 	connect(openBtn, &QPushButton::clicked, this, &MainWindow::loadImageFile);
 	connect(exportBtn, &QPushButton::clicked, this, &MainWindow::exportAnimHeader);
 	connect(exportAllBtn, &QPushButton::clicked, this, &MainWindow::exportAllAssets);
+	connect(exportPackBtn, &QPushButton::clicked, this, &MainWindow::exportAssetsToSingleFile);
 	connect(m_imgPlayBtn, &QPushButton::clicked, this, &MainWindow::togglePlayback);
 	connect(removeBtn, &QPushButton::clicked, this, &MainWindow::removeCurrentAsset);
 	connect(clearBtn, &QPushButton::clicked, this, [this] {
@@ -2179,6 +2187,99 @@ void MainWindow::exportAllAssets()
 		           .arg(errors.join(QStringLiteral("\n")));
 	}
 	QMessageBox::information(this, QStringLiteral("导出完成"), msg);
+}
+
+/* ==========================================================================
+ *  全部素材写进一个 .h —— 但每份各存各的
+ *
+ *  和「全部导出…」的区别只有一个：文件数。那边是 N 份素材 → N 个 .h，
+ *  这边是 N 份素材 → 1 个 .h，里面每份仍然有自己的宏、数组、显示函数，
+ *  名字按素材名打头，没有合并成一段动画数据。
+ * ========================================================================== */
+
+void MainWindow::exportAssetsToSingleFile()
+{
+	if (m_assets.isEmpty())
+	{
+		QMessageBox::information(this, QStringLiteral("还没有素材"),
+		                         QStringLiteral("先添加图片或动图。"));
+		return;
+	}
+
+	const QString dir = !m_headerPath.isEmpty()
+	                        ? QFileInfo(m_headerPath).absolutePath()
+	                        : (m_imgPath.isEmpty() ? QDir::homePath()
+	                                               : QFileInfo(m_imgPath).absolutePath());
+
+	const QString path = QFileDialog::getSaveFileName(
+		this, QStringLiteral("全部存进一个头文件"),
+		QDir(dir).filePath(QStringLiteral("oled_assets.h")),
+		QStringLiteral("C 头文件 (*.h)"));
+	if (path.isEmpty())
+	{
+		return;
+	}
+
+	/* 延时统一按"抽帧步长 × 单帧延时"折算，和「每份一个 .h」保持一致，
+	 * 否则同一份素材换个导出方式播放速度就变了。 */
+	QVector<ImageGen::Asset> list;
+	for (const ImageAsset &a : m_assets)
+	{
+		if (a.packed.isEmpty())
+		{
+			continue;
+		}
+		ImageGen::Asset one;
+		one.ident      = a.name;
+		one.sourceName = a.sourceName;
+		one.frames     = a.packed;
+		one.opt        = a.opt;
+		one.delayMs    = qMax(1, a.delayMs) * qMax(1, a.step);
+		list.append(one);
+	}
+	if (list.isEmpty())
+	{
+		QMessageBox::information(this, QStringLiteral("没有可导出的素材"),
+		                         QStringLiteral("列表里的素材都还没有帧。"));
+		return;
+	}
+
+	const QString err = ImageGen::writeMultiHeaderFile(path, list, QFileInfo(path).fileName());
+	if (!err.isEmpty())
+	{
+		QMessageBox::critical(this, QStringLiteral("写不进去"),
+		                      QStringLiteral("%1\n\n%2").arg(path, err));
+		return;
+	}
+
+	/* 把每份的宏前缀列出来：用户接下来要去 .c 里照着这个名字调函数，
+	 * 让他不用回头翻头文件。 */
+	QStringList lines;
+	int total = 0;
+	for (const ImageGen::Asset &a : list)
+	{
+		QString camel = ImageGen::sanitizeIdentifier(a.ident);
+		camel[0] = camel.at(0).toUpper();
+		const int bytes = ImageGen::bytesPerFrame(a.opt.width, a.opt.height) * a.frames.size();
+		total += bytes;
+		lines << QStringLiteral("  %1 · %2 帧 · %3×%4 · %5_ShowFrame(i)")
+		             .arg(camel)
+		             .arg(a.frames.size())
+		             .arg(a.opt.width)
+		             .arg(a.opt.height)
+		             .arg(camel);
+	}
+
+	QMessageBox::information(this, QStringLiteral("导出成功"),
+		QStringLiteral("已写入：\n%1\n\n%2 份素材，共 %3 字节（%4 KB）\n\n"
+		               "每份各自独立（没有合成动画），点阵上方注明了导入时的文件名：\n%5\n\n"
+		               "把【适配区】三个宏指向你的写命令、写数据、延时函数，"
+		               "再调对应的 Xxx_ShowFrame(i) 就行。")
+		.arg(path)
+		.arg(list.size())
+		.arg(total)
+		.arg(total / 1024.0, 0, 'f', 1)
+		.arg(lines.join(QLatin1Char('\n'))));
 }
 
 /* ==========================================================================

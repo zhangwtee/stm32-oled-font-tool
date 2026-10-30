@@ -252,6 +252,141 @@ QString ImageGen::uniqueName(const QStringList &used, const QString &proposed)
     return base;
 }
 
+/* ==========================================================================
+ *  头文件生成：单份 / 多份打包
+ *
+ *  两种输出有三大块是完全一样的：帧去重、点阵的十六进制文本、刷屏函数。
+ *  抽在这里共用，免得「单份」和「打包」各写一遍、改一处漏一处。
+ *
+ *  这些函数都带前缀参数（up = LOGO，camel = Logo）：单份那条路仍然传
+ *  ANIM / Anim，和以前一样，最后再整体替换 —— 输出逐字节不变。
+ * ========================================================================== */
+namespace {
+
+/* 帧去重：完全相同的帧只留一份，map 记录逻辑帧号 → 数据帧号 */
+void dedupFrames(const QVector<QVector<quint8>> &frames,
+                 QVector<QVector<quint8>> *unique,
+                 QVector<int> *map)
+{
+    unique->clear();
+    map->clear();
+    unique->reserve(frames.size());
+    map->reserve(frames.size());
+
+    for (int f = 0; f < frames.size(); ++f)
+    {
+        int hit = -1;
+        for (int u = 0; u < unique->size(); ++u)
+        {
+            if (unique->at(u) == frames.at(f))
+            {
+                hit = u;
+                break;
+            }
+        }
+        if (hit < 0)
+        {
+            hit = unique->size();
+            unique->append(frames.at(f));
+        }
+        map->append(hit);
+    }
+}
+
+/* 每帧的十六进制初始化体（含"第 N 帧"标题），一直到最后的 }; 之前 */
+QString frameHexBlock(const QVector<QVector<quint8>> &unique)
+{
+    QString s;
+    for (int f = 0; f < unique.size(); ++f)
+    {
+        s += QStringLiteral("    /* ---- 第 %1 帧 ---- */\n    {\n").arg(f);
+        const QVector<quint8> &b = unique.at(f);
+        for (int i = 0; i < b.size(); i += 16)
+        {
+            s += QStringLiteral("        ");
+            const int end = qMin(i + 16, b.size());
+            for (int k = i; k < end; ++k)
+            {
+                s += QStringLiteral("0x%1").arg(b.at(k), 2, 16, QLatin1Char('0')).toUpper()
+                         .replace(QStringLiteral("0X"), QStringLiteral("0x"));
+                if (k + 1 < b.size())
+                {
+                    s += QLatin1Char(',');
+                }
+            }
+            s += QLatin1Char('\n');
+        }
+        s += QStringLiteral("    },\n");
+    }
+    return s;
+}
+
+/* 逻辑帧号 → 数据帧号的映射表（只有去重时才生成） */
+QString mapBlock(const QString &up, const QString &camel, const QString &idxType,
+                 const QVector<int> &map, int count)
+{
+    QString s;
+    s += QStringLiteral("/* 逻辑帧号 -> 数据帧号。重复的帧指向同一份数据，逐帧重刷画面一样，\n");
+    s += QStringLiteral(" * 所以播放写法和没有重复帧时完全一致。 */\n");
+    s += QStringLiteral("static const %1 %2_Map[%3_COUNT] =\n{\n").arg(idxType, camel, up);
+    for (int f = 0; f < count; f += 16)
+    {
+        s += QStringLiteral("    ");
+        const int end = qMin(f + 16, count);
+        for (int k = f; k < end; ++k)
+        {
+            s += QStringLiteral("%1").arg(map.at(k), 3);
+            if (k + 1 < count)
+            {
+                s += QLatin1Char(',');
+            }
+        }
+        s += QStringLiteral("   /* 帧 %1..%2 */\n").arg(f).arg(end - 1);
+    }
+    s += QStringLiteral("};\n\n");
+    return s;
+}
+
+/* 整屏刷一帧的函数。writeCmd / writeData / unused 是适配区里那三个宏 */
+QString showFrameBlock(const QString &up, const QString &camel,
+                       const QString &writeCmd, const QString &writeData,
+                       const QString &unused, const QString &idxType, bool deduped)
+{
+    QString s;
+    s += QStringLiteral("/* 把第 i 帧整屏刷到屏上。自己发三条定位命令，不依赖驱动里的设光标函数，\n");
+    s += QStringLiteral(" * 也就绕开了各种例程参数顺序（页在前 / 列在前）不一致的问题。 */\n");
+    s += QStringLiteral("static %1 void %2_ShowFrame(%3 i)\n").arg(unused, camel, idxType);
+    s += QStringLiteral("{\n");
+    s += QStringLiteral("    const uint8_t *f;\n");
+    s += QStringLiteral("    uint8_t page;\n");
+    s += QStringLiteral("    uint8_t col;\n");
+    s += QStringLiteral("\n");
+    s += QStringLiteral("    if (i >= %1_COUNT)\n").arg(up);
+    s += QStringLiteral("    {\n");
+    s += QStringLiteral("        return;\n");
+    s += QStringLiteral("    }\n");
+    s += QStringLiteral("    f = &%1_Frames[%2][0];\n")
+             .arg(camel, deduped ? QStringLiteral("%1_Map[i]").arg(camel) : QStringLiteral("i"));
+    s += QStringLiteral("\n");
+    s += QStringLiteral("    for (page = 0; page < %1_PAGES; page++)\n").arg(up);
+    s += QStringLiteral("    {\n");
+    s += QStringLiteral("        %1((uint8_t)(0xB0 | (page & 0x07)));\n").arg(writeCmd);
+    s += QStringLiteral("        %1((uint8_t)(0x10 | ((%2_COL_OFFSET >> 4) & 0x0F)));\n")
+             .arg(writeCmd, up);
+    s += QStringLiteral("        %1((uint8_t)(0x00 | (%2_COL_OFFSET & 0x0F)));\n")
+             .arg(writeCmd, up);
+    s += QStringLiteral("\n");
+    s += QStringLiteral("        for (col = 0; col < %1_WIDTH; col++)\n").arg(up);
+    s += QStringLiteral("        {\n");
+    s += QStringLiteral("            %1(f[page * %2_WIDTH + col]);\n").arg(writeData, up);
+    s += QStringLiteral("        }\n");
+    s += QStringLiteral("    }\n");
+    s += QStringLiteral("}\n\n");
+    return s;
+}
+
+}   // namespace
+
 QString ImageGen::renderHeader(const QVector<QVector<quint8>> &frames,
                                const Options &opt,
                                int delayMs,
@@ -276,26 +411,7 @@ QString ImageGen::renderHeader(const QVector<QVector<quint8>> &frames,
      */
     QVector<QVector<quint8>> unique;
     QVector<int> map;
-    unique.reserve(count);
-    map.reserve(count);
-    for (int f = 0; f < count; ++f)
-    {
-        int hit = -1;
-        for (int u = 0; u < unique.size(); ++u)
-        {
-            if (unique.at(u) == frames.at(f))
-            {
-                hit = u;
-                break;
-            }
-        }
-        if (hit < 0)
-        {
-            hit = unique.size();
-            unique.append(frames.at(f));
-        }
-        map.append(hit);
-    }
+    dedupFrames(frames, &unique, &map);
     const int dataCount = unique.size();
     const bool deduped  = (dataCount < count);
 
@@ -421,80 +537,17 @@ QString ImageGen::renderHeader(const QVector<QVector<quint8>> &frames,
 
     s += QStringLiteral("const uint8_t Anim_Frames[%1][ANIM_FRAME_SIZE] =\n{\n")
              .arg(deduped ? QStringLiteral("ANIM_DATA_COUNT") : QStringLiteral("ANIM_COUNT"));
-
-    for (int f = 0; f < dataCount; ++f)
-    {
-        s += QStringLiteral("    /* ---- 第 %1 帧 ---- */\n    {\n").arg(f);
-        const QVector<quint8> &b = unique.at(f);
-        for (int i = 0; i < b.size(); i += 16)
-        {
-            s += QStringLiteral("        ");
-            const int end = qMin(i + 16, b.size());
-            for (int k = i; k < end; ++k)
-            {
-                s += QStringLiteral("0x%1").arg(b.at(k), 2, 16, QLatin1Char('0')).toUpper()
-                         .replace(QStringLiteral("0X"), QStringLiteral("0x"));
-                if (k + 1 < b.size())
-                {
-                    s += QLatin1Char(',');
-                }
-            }
-            s += QLatin1Char('\n');
-        }
-        s += QStringLiteral("    },\n");
-    }
-
+    s += frameHexBlock(unique);
     s += QStringLiteral("};\n\n");
 
     if (deduped)
     {
-        s += QStringLiteral("/* 逻辑帧号 -> 数据帧号。重复的帧指向同一份数据，逐帧重刷画面一样，\n");
-        s += QStringLiteral(" * 所以播放写法和没有重复帧时完全一致。 */\n");
-        s += QStringLiteral("static const %1 Anim_Map[ANIM_COUNT] =\n{\n").arg(idxType);
-        for (int f = 0; f < count; f += 16)
-        {
-            s += QStringLiteral("    ");
-            const int end = qMin(f + 16, count);
-            for (int k = f; k < end; ++k)
-            {
-                s += QStringLiteral("%1").arg(map.at(k), 3);
-                if (k + 1 < count)
-                {
-                    s += QLatin1Char(',');
-                }
-            }
-            s += QStringLiteral("   /* 帧 %1..%2 */\n").arg(f).arg(end - 1);
-        }
-        s += QStringLiteral("};\n\n");
+        s += mapBlock(QStringLiteral("ANIM"), QStringLiteral("Anim"), idxType, map, count);
     }
 
-    s += QStringLiteral("/* 把第 i 帧整屏刷到屏上。自己发三条定位命令，不依赖驱动里的设光标函数，\n");
-    s += QStringLiteral(" * 也就绕开了各种例程参数顺序（页在前 / 列在前）不一致的问题。 */\n");
-    s += QStringLiteral("static ANIM_UNUSED void Anim_ShowFrame(%1 i)\n").arg(idxType);
-    s += QStringLiteral("{\n");
-    s += QStringLiteral("    const uint8_t *f;\n");
-    s += QStringLiteral("    uint8_t page;\n");
-    s += QStringLiteral("    uint8_t col;\n");
-    s += QStringLiteral("\n");
-    s += QStringLiteral("    if (i >= ANIM_COUNT)\n");
-    s += QStringLiteral("    {\n");
-    s += QStringLiteral("        return;\n");
-    s += QStringLiteral("    }\n");
-    s += QStringLiteral("    f = &Anim_Frames[%1][0];\n")
-             .arg(deduped ? QStringLiteral("Anim_Map[i]") : QStringLiteral("i"));
-    s += QStringLiteral("\n");
-    s += QStringLiteral("    for (page = 0; page < ANIM_PAGES; page++)\n");
-    s += QStringLiteral("    {\n");
-    s += QStringLiteral("        ANIM_WRITE_CMD((uint8_t)(0xB0 | (page & 0x07)));\n");
-    s += QStringLiteral("        ANIM_WRITE_CMD((uint8_t)(0x10 | ((ANIM_COL_OFFSET >> 4) & 0x0F)));\n");
-    s += QStringLiteral("        ANIM_WRITE_CMD((uint8_t)(0x00 | (ANIM_COL_OFFSET & 0x0F)));\n");
-    s += QStringLiteral("\n");
-    s += QStringLiteral("        for (col = 0; col < ANIM_WIDTH; col++)\n");
-    s += QStringLiteral("        {\n");
-    s += QStringLiteral("            ANIM_WRITE_DATA(f[page * ANIM_WIDTH + col]);\n");
-    s += QStringLiteral("        }\n");
-    s += QStringLiteral("    }\n");
-    s += QStringLiteral("}\n\n");
+    s += showFrameBlock(QStringLiteral("ANIM"), QStringLiteral("Anim"),
+                        QStringLiteral("ANIM_WRITE_CMD"), QStringLiteral("ANIM_WRITE_DATA"),
+                        QStringLiteral("ANIM_UNUSED"), idxType, deduped);
 
     s += QStringLiteral("#endif /* __ANIM_FRAMES_H */\n");
 
@@ -537,6 +590,275 @@ QString ImageGen::writeHeaderFile(const QString &path,
     ts << renderHeader(frames, opt, delayMs, sourceName, ident);
 
     /* 显式 close 再看错误：磁盘满这类问题在写的时候不报，落盘那一步才报 */
+    file.close();
+    if (file.error() != QFileDevice::NoError)
+    {
+        return file.errorString();
+    }
+    return QString();
+}
+
+/* ==========================================================================
+ *  多份素材打包进一个头文件（各自独立，不合成动画）
+ * ========================================================================== */
+
+QString ImageGen::renderMultiHeader(const QVector<Asset> &assets, const QString &title)
+{
+    /* 空帧的素材直接跳过：C 里没有"长度 0 的数组"，
+     * 生成出来只会是一份编不过的文件，不如不写。 */
+    QVector<Asset> list;
+    for (const Asset &a : assets)
+    {
+        if (!a.frames.isEmpty())
+        {
+            list.append(a);
+        }
+    }
+    if (list.isEmpty())
+    {
+        return QString();
+    }
+
+    /*
+     * include guard 跟着文件名走：assets.h → __ASSETS_H。
+     *
+     * 单份头文件早就因为这个吃过大亏（两份都叫 __ANIM_FRAMES_H，
+     * 第二份被第一份的 guard 整份吞掉，不报错、只是数据没了）。
+     * 打包文件如果统一写死一个 guard，同样的事情会在"两个素材包"上重演。
+     */
+    const QString base = QFileInfo(title).completeBaseName();
+    QString guard = base.isEmpty() ? QStringLiteral("OLED_ASSETS")
+                                   : sanitizeIdentifier(base).toUpper();
+    guard = QStringLiteral("__%1_H").arg(guard);
+
+    /* 素材名去重：两处都叫 logo 时会生成两套一模一样的宏，
+     * 编译器报"重定义"，用户看不出是自己起名撞了。这里按界面那套规则
+     * 补 _2 / _3，保证生成的文件一定编得过。 */
+    QStringList used;
+    QVector<QString> camelOf;
+    QVector<QString> upOf;
+    camelOf.reserve(list.size());
+    upOf.reserve(list.size());
+    for (int i = 0; i < list.size(); ++i)
+    {
+        /* 名字为空时先补个 image 再查重：空串查不出重名，
+         * 两份空名字会得到两个 IMAGE_，又撞上了。 */
+        const QString proposed = list.at(i).ident.isEmpty() ? QStringLiteral("image")
+                                                            : list.at(i).ident;
+        QString obj = sanitizeIdentifier(uniqueName(used, proposed));
+        used << obj;
+        obj[0] = obj.at(0).toUpper();
+        camelOf.append(obj);
+        upOf.append(obj.toUpper());
+    }
+
+    int totalBytes = 0;
+    for (const Asset &a : list)
+    {
+        totalBytes += bytesPerFrame(a.opt.width, a.opt.height) * a.frames.size();
+    }
+
+    QString s;
+
+    /* ---------------- 文件抬头 ---------------- */
+    s += QStringLiteral("/* ============================================================\n");
+    s += QStringLiteral(" *  OLED 点阵素材包：%1 份素材，各存各的\n").arg(list.size());
+    s += QStringLiteral(" *\n");
+    s += QStringLiteral(" *  这里**没有把素材合成成一个动画**：每份都有自己的宏、数组和显示\n");
+    s += QStringLiteral(" *  函数，名字按素材名打头（logo → LOGO_WIDTH / Logo_ShowFrame），\n");
+    s += QStringLiteral(" *  互不影响。想刷哪一份就调哪一份的 Xxx_ShowFrame(i)。\n");
+    s += QStringLiteral(" *\n");
+    s += QStringLiteral(" *  清单（顺序和导出时的素材列表一致）：\n");
+    for (int i = 0; i < list.size(); ++i)
+    {
+        const Asset &a = list.at(i);
+        s += QStringLiteral(" *    %1. %2  ——  %3x%4，%5 帧，%6 字节，导入自 %7\n")
+                 .arg(i + 1)
+                 .arg(camelOf.at(i), -10)
+                 .arg(a.opt.width)
+                 .arg(a.opt.height)
+                 .arg(a.frames.size())
+                 .arg(bytesPerFrame(a.opt.width, a.opt.height) * a.frames.size())
+                 .arg(a.sourceName.isEmpty() ? QStringLiteral("未记录") : a.sourceName);
+    }
+    s += QStringLiteral(" *\n");
+    s += QStringLiteral(" *  合计    : %1 字节 (%2 KB)\n")
+             .arg(totalBytes)
+             .arg(totalBytes / 1024.0, 0, 'f', 1);
+    s += QStringLiteral(" *\n");
+    s += QStringLiteral(" *  数据格式：阴码 / 列行式 / 逆向(低位在前) —— 和汉字字库完全一致\n");
+    s += QStringLiteral(" *            每字节 = 一列的 8 个像素，bit0 在最上面\n");
+    s += QStringLiteral(" *            按页排列：先第 0 页的 0~W-1 列，再第 1 页……\n");
+    s += QStringLiteral(" *\n");
+    s += QStringLiteral(" *  用法：只在一个 .c 里 include 本文件（多个 .c 包含会重复定义数组）。\n");
+    s += QStringLiteral(" * ============================================================ */\n\n");
+
+    s += QStringLiteral("#ifndef %1\n").arg(guard);
+    s += QStringLiteral("#define %1\n\n").arg(guard);
+    s += QStringLiteral("#include <stdint.h>\n\n");
+
+    /* ---------------- 适配区（全文件共用一份） ---------------- */
+    s += QStringLiteral("/* ============================================================\n");
+    s += QStringLiteral(" *  【适配区】多份素材共用，只改这里，下面的函数体不用动\n");
+    s += QStringLiteral(" *\n");
+    s += QStringLiteral(" *  驱动的底层只有两个动作：发一条命令、发一个字节数据。\n");
+    s += QStringLiteral(" *  常见两种写法：\n");
+    s += QStringLiteral(" *\n");
+    s += QStringLiteral(" *  (A) 命令和数据分成两个函数（中景园新版、多数 HAL 例程）\n");
+    s += QStringLiteral(" *      #define OLED_WRITE_CMD(c)   OLED_WriteCommand(c)\n");
+    s += QStringLiteral(" *      #define OLED_WRITE_DATA(d)  OLED_WriteData(d)\n");
+    s += QStringLiteral(" *\n");
+    s += QStringLiteral(" *  (B) 一个函数加 cmd 标志位（正点原子、中景园旧版）\n");
+    s += QStringLiteral(" *      #define OLED_WRITE_CMD(c)   OLED_WR_Byte((c), 1)\n");
+    s += QStringLiteral(" *      #define OLED_WRITE_DATA(d)  OLED_WR_Byte((d), 0)\n");
+    s += QStringLiteral(" *\n");
+    s += QStringLiteral(" *  有些工程把这两个函数只写在 .c 里、没在 .h 里声明，在自己文件里\n");
+    s += QStringLiteral(" *  调用会报未声明。把这两行补进对应的 .h 即可：\n");
+    s += QStringLiteral(" *      void OLED_WriteCommand(uint8_t cmd);\n");
+    s += QStringLiteral(" *      void OLED_WriteData(uint8_t dat);\n");
+    s += QStringLiteral(" * ============================================================ */\n");
+    s += QStringLiteral("#define OLED_WRITE_CMD(c)    OLED_WriteCommand(c)\n");
+    s += QStringLiteral("#define OLED_WRITE_DATA(d)   OLED_WriteData(d)\n\n");
+    s += QStringLiteral("/* 帧间延时：HAL_Delay(ms) / vTaskDelay(pdMS_TO_TICKS(ms)) / Delay_ms(ms) */\n");
+    s += QStringLiteral("#define OLED_DELAY(ms)       HAL_Delay(ms)\n\n");
+    s += QStringLiteral("#if defined(__GNUC__)\n");
+    s += QStringLiteral("#define OLED_UNUSED  __attribute__((unused))\n");
+    s += QStringLiteral("#else\n");
+    s += QStringLiteral("#define OLED_UNUSED\n");
+    s += QStringLiteral("#endif\n\n");
+
+    /* ---------------- 每份素材各一块 ---------------- */
+    for (int i = 0; i < list.size(); ++i)
+    {
+        const Asset &a      = list.at(i);
+        const QString &up   = upOf.at(i);
+        const QString &cam  = camelOf.at(i);
+
+        const int frameSize = bytesPerFrame(a.opt.width, a.opt.height);
+        const int count     = a.frames.size();
+        const int pages     = a.opt.height / 8;
+
+        QVector<QVector<quint8>> unique;
+        QVector<int> map;
+        dedupFrames(a.frames, &unique, &map);
+        const int  dataCount = unique.size();
+        const bool deduped   = (dataCount < count);
+
+        const bool wideIndex = (count > 255) || (dataCount > 255);
+        const QString idxType = wideIndex ? QStringLiteral("uint16_t")
+                                          : QStringLiteral("uint8_t");
+
+        const QString src = a.sourceName.isEmpty() ? QStringLiteral("未记录") : a.sourceName;
+
+        /* 每块的抬头。第一行就写"导入自哪个文件" —— 隔了几天回来，
+         * 只看点阵是认不出它原来是哪张图的。 */
+        s += QStringLiteral("/* ============================================================\n");
+        s += QStringLiteral(" *  素材 %1/%2：%3\n").arg(i + 1).arg(list.size()).arg(cam);
+        s += QStringLiteral(" *  导入自  : %1\n").arg(src);
+        s += QStringLiteral(" *  尺寸    : %1 x %2（%3 页，每页 %4 字节；一帧 %5 字节）\n")
+                 .arg(a.opt.width).arg(a.opt.height).arg(pages).arg(a.opt.width).arg(frameSize);
+        if (deduped)
+        {
+            s += QStringLiteral(" *  帧数    : %1 帧（重复帧只存一份，数据 %2 份）\n")
+                     .arg(count).arg(dataCount);
+        }
+        else
+        {
+            s += QStringLiteral(" *  帧数    : %1 帧\n").arg(count);
+        }
+        if (count > 1)
+        {
+            s += QStringLiteral(" *  帧延时  : %1 ms  (约 %2 fps)\n")
+                     .arg(a.delayMs).arg(1000.0 / qMax(1, a.delayMs), 0, 'f', 1);
+        }
+        s += QStringLiteral(" *  数据量  : %1 字节 (%2 KB)\n")
+                 .arg(dataCount * frameSize)
+                 .arg(dataCount * frameSize / 1024.0, 0, 'f', 1);
+        if (count > 1)
+        {
+            s += QStringLiteral(" *  刷屏    : %1_ShowFrame(0) … %1_ShowFrame(%2)\n")
+                     .arg(cam).arg(count - 1);
+        }
+        else
+        {
+            s += QStringLiteral(" *  刷屏    : %1_ShowFrame(0)  只有一帧，刷一次就是静态图\n").arg(cam);
+        }
+        s += QStringLiteral(" * ============================================================ */\n");
+
+        auto def = [](const QString &name, const QString &value) {
+            return QStringLiteral("#define %1 %2\n").arg(name, -20).arg(value);
+        };
+        s += def(up + QStringLiteral("_WIDTH"), QString::number(a.opt.width));
+        s += def(up + QStringLiteral("_HEIGHT"), QString::number(a.opt.height));
+        s += def(up + QStringLiteral("_PAGES"),
+                 QStringLiteral("(%1_HEIGHT / 8)").arg(up));
+        s += def(up + QStringLiteral("_FRAME_SIZE"), QString::number(frameSize));
+        s += def(up + QStringLiteral("_COUNT"), QString::number(count));
+        if (deduped)
+        {
+            s += QStringLiteral("/* 上面是播放帧数。完全相同的帧只存了一份，所以数组里实际只有 %1 帧；\n")
+                     .arg(dataCount);
+            s += QStringLiteral(" * 中间靠下面的 %1_Map 把逻辑帧号指回数据帧号，播放时长不变。 */\n")
+                     .arg(cam);
+            s += def(up + QStringLiteral("_DATA_COUNT"), QString::number(dataCount));
+        }
+        s += def(up + QStringLiteral("_DELAY_MS"), QString::number(a.delayMs));
+        s += def(up + QStringLiteral("_COL_OFFSET"),
+                 QString::number(a.opt.colOffset < 0 ? 0 : a.opt.colOffset));
+        s += QStringLiteral("\n");
+
+        /* 点阵正上方再写一次文件名：这段是用户真正要"认数据"的地方，
+         * 抬头离得远，翻到数组这里就想直接看到它来自哪个文件。 */
+        s += QStringLiteral("/* 点阵数据 —— %1，导入自 %2 */\n").arg(cam, src);
+        s += QStringLiteral("const uint8_t %1_Frames[%2][%3_FRAME_SIZE] =\n{\n")
+                 .arg(cam,
+                      deduped ? up + QStringLiteral("_DATA_COUNT") : up + QStringLiteral("_COUNT"),
+                      up);
+        s += frameHexBlock(unique);
+        s += QStringLiteral("};\n\n");
+
+        if (deduped)
+        {
+            s += mapBlock(up, cam, idxType, map, count);
+        }
+
+        s += showFrameBlock(up, cam,
+                            QStringLiteral("OLED_WRITE_CMD"), QStringLiteral("OLED_WRITE_DATA"),
+                            QStringLiteral("OLED_UNUSED"), idxType, deduped);
+    }
+
+    s += QStringLiteral("#endif /* %1 */\n").arg(guard);
+    return s;
+}
+
+QString ImageGen::writeMultiHeaderFile(const QString &path,
+                                       const QVector<Asset> &assets,
+                                       const QString &title)
+{
+    if (path.isEmpty())
+    {
+        return QStringLiteral("没有指定文件名");
+    }
+
+    /* 标题没给就用文件名：include guard 靠它区分不同的素材包 */
+    const QString name = title.isEmpty() ? QFileInfo(path).fileName() : title;
+    const QString content = renderMultiHeader(assets, name);
+    if (content.isEmpty())
+    {
+        return QStringLiteral("没有可导出的素材（每份素材都至少要有 1 帧）");
+    }
+
+    QFile file(path);
+    if (!file.open(QIODevice::WriteOnly | QIODevice::Text))
+    {
+        return file.errorString();
+    }
+
+    QTextStream ts(&file);
+    ts.setEncoding(QStringConverter::Utf8);
+    ts << content;
+
+    /* 同 writeHeaderFile：open 成功不等于写成功，落盘那一步才报错 */
     file.close();
     if (file.error() != QFileDevice::NoError)
     {
