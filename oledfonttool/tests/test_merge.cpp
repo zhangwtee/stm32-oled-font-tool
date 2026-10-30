@@ -189,6 +189,40 @@ int main(int argc, char **argv)
 		      QStringLiteral("长度 %1 -> %2").arg(mainBytes.size()).arg(back.size()));
 	}
 
+	std::printf("[撤销的边界]\n");
+	{
+		/* (a) 目标文件被人删了、只剩备份。
+		 * 老实现先 QFile::remove(f)：文件本来就不在，remove 返回 false，
+		 * 于是直接报"删不掉 xxx，可能被 Keil 占用了" —— 备份明明就在旁边，
+		 * 却撤销不了，用户只能手动改名。 */
+		const QString bak = mainC + QStringLiteral(".oledbak");
+		const QString tmp = mainC + QStringLiteral(".oledtmp");
+
+		writeFile(mainC, mainBytes);
+		QFile::remove(bak);
+		QFile::remove(tmp);
+		const bool copied = QFile::copy(mainC, bak);
+		check("造出备份", copied, bak);
+		QFile::remove(mainC);
+
+		QString e1;
+		const bool ok1 = MergeProject::revert(QStringList() << mainC, &e1);
+		check("目标被删、只有备份 -> 能还原", ok1, e1);
+		check("还原出来的内容和原始字节一致", readFile(mainC) == mainBytes,
+		      QStringLiteral("长度 %1").arg(readFile(mainC).size()));
+		check("还原后备份已清掉", !QFileInfo::exists(bak), bak);
+		check("不留 .oledtmp 残留", !QFileInfo::exists(tmp), tmp);
+
+		/* (b) 没有备份的文件：revert 应该安静跳过，一个字节都不动。
+		 * "撤销"是整批处理的，其中一个文件没备份不该让其余的都失败。 */
+		QFile::remove(bak);
+		const QByteArray keep = readFile(mainC);
+		QString e2;
+		const bool ok2 = MergeProject::revert(QStringList() << mainC, &e2);
+		check("没有备份 -> 返回成功", ok2, e2);
+		check("没有备份 -> 文件没被动过", readFile(mainC) == keep, QString());
+	}
+
 	std::printf("\n%d passed, %d failed\n", g_pass, g_fail);
 	return g_fail == 0 ? 0 : 1;
 }

@@ -15,7 +15,7 @@
  * 也就是：
  *     每字节 = 某一列的连续 8 个像素，bit0 在最上面
  *     按页排列：先第 0 页的 0..W-1 列，再第 1 页……
- *     一帧字节数 = (W/8) * H
+ *     一帧字节数 = W * (H / 8)
  *
  * 这样 MCU 侧不需要任何转换，直接把字节按页写给屏就行。
  */
@@ -39,8 +39,17 @@ public:
         int    colOffset = 0;       /* SH1106（132 列）填 2，SSD1306 填 0 */
     };
 
-    /* 一帧多少字节 */
-    static int bytesPerFrame(int w, int h) { return (w / 8) * h; }
+    /*
+     * 一帧多少字节。
+     *
+     * 必须和 packToDisplay 的写入方式完全一致：`out[page * w + x]`，
+     * 页数 = h / 8，所以是 w * (h / 8)。
+     * 原来写成 (w / 8) * h —— 那其实是"横向像素字节数 × 高"，
+     * 只在 w 是 8 的倍数时才和写入布局相等。界面只给 128 宽，所以一直没露头，
+     * 但两条公式对着写的代码只要哪天放开宽度就会差出几十字节：
+     * 数组开小了、头文件里的 FRAME_SIZE 也跟着错。
+     */
+    static int bytesPerFrame(int w, int h) { return w * (h / 8); }
     static int flashBytes(int w, int h, int frames) { return bytesPerFrame(w, h) * frames; }
 
     /*

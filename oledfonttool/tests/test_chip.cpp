@@ -140,6 +140,32 @@ int main(int argc, char *argv[])
 	}
 	expectDir(QDir(fixture).absoluteFilePath(QStringLiteral("chip_ld")), 512,
 	          "链接脚本 FLASH LENGTH = 512K");
+
+	/* LENGTH 写成十六进制。老正则只认 [0-9]+，遇到 0x40000 会匹配到开头的
+	 * "0"，算出 0 又不报错，于是这份完全合格的链接脚本被悄悄忽略，
+	 * 一路退到型号解码甚至返回 0 —— 界面上要么显示错的容量，要么显示"未知"。 */
+	expectDir(QDir(fixture).absoluteFilePath(QStringLiteral("chip_ld_hex")), 256,
+	          "链接脚本 LENGTH = 0x40000 -> 256KB");
+
+	/* 目录里有两个 .ld：排在前面的那份只描述 RAM。
+	 * 老实现只读第一个文件，于是整个链接脚本检查直接失效。 */
+	expectDir(QDir(fixture).absoluteFilePath(QStringLiteral("chip_ld_multi")), 128,
+	          "多个 .ld：跳过只有 RAM 的那份，取 128K");
+
+	/* 目录里有两个 Keil 工程：排在前面的那个没写 <IROM>。
+	 * 老实现只读第一个，只能按型号算 64KB；其实同目录另一个工程写了 256KB。 */
+	expectDir(QDir(fixture).absoluteFilePath(QStringLiteral("chip_uv_multi")), 256,
+	          "多个 .uvprojx：取写了 IROM 的那个 256KB");
+	{
+		const ChipInfo::Result r = ChipInfo::read(
+			QDir(fixture).absoluteFilePath(QStringLiteral("chip_uv_multi")));
+		check("多工程时 source 标明来自 IROM",
+		      r.source.contains(QStringLiteral("IROM")),
+		      r.source);
+		check("多工程时型号跟着 IROM 那份走",
+		      r.device == QLatin1String("STM32F103RC"),
+		      r.device);
+	}
 	expectDir(QDir(fixture).absoluteFilePath(QStringLiteral("chip_icf")), 64,
 	          "IAR .icf 的 ROM_size = 0x10000");
 

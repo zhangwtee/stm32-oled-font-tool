@@ -162,6 +162,51 @@ int main(int argc, char **argv)
 		}
 	}
 
+	/* ---------------- 帧字节数：公式必须和写入布局一致 ---------------- */
+	std::printf("[帧字节数]\n");
+	{
+		/* 128 宽只是"8 的倍数"的特例。
+		 * packToDisplay 按 page * w + x 写，真实长度是 w * (h / 8)；
+		 * bytesPerFrame 原来写成 (w / 8) * h，两者只在 w % 8 == 0 时相等。
+		 * 界面现在只给 128 宽，所以这个错一直没露头，但头文件里的
+		 * ANIM_FRAME_SIZE 和数组维数都靠它 —— 哪天放开宽度就是数组错位。 */
+		const struct { int w; int h; } cases[] = {
+			{128, 64}, {128, 32}, {64, 64}, {100, 60}, {130, 64}, {99, 55}
+		};
+
+		for (const auto &c : cases)
+		{
+			QImage mono(c.w, c.h, QImage::Format_Mono);
+			mono.setColorCount(2);
+			mono.setColor(0, qRgb(0, 0, 0));
+			mono.setColor(1, qRgb(255, 255, 255));
+			mono.fill(0);
+
+			const QVector<quint8> packed = ImageGen::packToDisplay(mono);
+			const int want = c.w * (c.h / 8);
+			const QByteArray tag = QStringLiteral("点阵 %1x%2").arg(c.w).arg(c.h).toUtf8();
+
+			check(tag.constData(), packed.size() == want,
+			      QStringLiteral("packToDisplay 出来 %1 字节，按页排布应该是 %2")
+			          .arg(packed.size()).arg(want));
+			check(tag.constData(), ImageGen::bytesPerFrame(c.w, c.h) == want,
+			      QStringLiteral("bytesPerFrame 给 %1，实际写入 %2")
+			          .arg(ImageGen::bytesPerFrame(c.w, c.h)).arg(want));
+
+			/* 头文件里的 FRAME_SIZE 必须跟着真实长度走，否则数组维数就错了 */
+			ImageGen::Options o;
+			o.width  = c.w;
+			o.height = c.h;
+			QVector<QVector<quint8>> one;
+			one.append(packed);
+			const QString hc = ImageGen::renderHeader(one, o, 100, QStringLiteral("t.png"));
+			check(tag.constData(),
+			      macroValue(hc, QStringLiteral("ANIM_FRAME_SIZE")) == want,
+			      QStringLiteral("头文件里是 %1，实际每帧 %2 字节")
+			          .arg(macroValue(hc, QStringLiteral("ANIM_FRAME_SIZE"))).arg(want));
+		}
+	}
+
 	/* ---------------- 动画 ---------------- */
 	std::printf("[动画 anim.h]\n");
 	{

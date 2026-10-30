@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="UTF-8" standalone="no" ?>
+<Project>
+  <Targets>
+    <Target>
+      <TargetName>App</TargetName>
+      <Device>STM32F103RC</Device>
+      <TargetOption>
+        <TargetArmAds>
+          <ArmAdsMisc>
+            <OnChipMemories>
+              <IROM>
+                <Type>1</Type>
+                <StartAddress>0x8000000</StartAddress>
+                <Size>0x40000</Size>
+              </IROM>
+            </OnChipMemories>
+          </ArmAdsMisc>
+        </TargetArmAds>
+      </TargetOption>
+    </Target>
+  </Targets>
+</Project>

@@ -30,6 +30,8 @@ oledfonttool\
   tests\                 <- 回归测试（不参与主构建，单独 cmake 配置）
     fixture\               各种写法的驱动样例（验屏控制器判断）+ move.gif（多帧 GIF）
                            + logo.h / move.h（两份带前缀的素材头文件，验同时 include）
+                           + chip_* 芯片容量样例（Keil IROM / .ld / .icf / 没写 IROM /
+                             十六进制 LENGTH / 多个 .ld / 多个工程）
     test_probe.cpp         判断逻辑：大小写、GBK、注释陷阱
     test_emit.cpp          导出内容：列偏移/屏高宏、帧去重、码表有序、多选读图、素材名前缀
     test_chip.cpp          芯片容量：真实工程读 64KB / 512KB，型号解码与兜底

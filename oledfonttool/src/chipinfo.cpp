@@ -140,26 +140,41 @@ Result read(const QString &projRoot)
 	}
 
 	/* ---- 1. Keil：<IROM><Size> 是链接器真正用的 ROM 大小，最可信 ---- */
-	const QString uvproj = findFirst(dir, QStringList() << QStringLiteral("*.uvprojx")
-	                                                   << QStringLiteral("*.uvproj"));
-	if (!uvproj.isEmpty())
+	/*
+	 * 一个目录里可能躺着好几个工程文件（Bootloader + App 两个目标、
+	 * 升级前后各留一份）。以前只取按名字排在最前的那个：赶上它没写
+	 * <IROM>（新建工程、旧 Keil 保存）就整段放弃，直接往下退 ——
+	 * 明明同目录另一个工程写得清清楚楚。
+	 * 现在逐个试，谁有 IROM 用谁；都没有才拿第一个能读出型号的兜底。
+	 */
+	static const QRegularExpression reDev(QStringLiteral("<Device>\\s*([^<\\s]+)\\s*</Device>"));
+	/* 一块 <IROM> 一个 ROM 区；多目标工程会出现多块，取第一块有 Size 的 */
+	static const QRegularExpression reBlock(
+		QStringLiteral("<IROM>[\\s\\S]*?</IROM>"),
+		QRegularExpression::CaseInsensitiveOption);
+	static const QRegularExpression reSize(
+		QStringLiteral("<Size>\\s*(0[xX][0-9A-Fa-f]+|[0-9]+)\\s*</Size>"),
+		QRegularExpression::CaseInsensitiveOption);
+
+	const QFileInfoList uvFiles = dir.entryInfoList(
+		QStringList() << QStringLiteral("*.uvprojx") << QStringLiteral("*.uvproj"),
+		QDir::Files, QDir::Name);
+
+	QString deviceFile;      /* 最后兜底：第一个能读出型号的工程 */
+	QString deviceName;
+
+	for (const QFileInfo &fi : uvFiles)
 	{
-		const QString text = readText(uvproj);
+		const QString uvproj = fi.absoluteFilePath();
+		const QString text   = readText(uvproj);
 
-		const QRegularExpression reDev(QStringLiteral("<Device>\\s*([^<\\s]+)\\s*</Device>"));
 		const QRegularExpressionMatch md = reDev.match(text);
-		if (md.hasMatch())
+		const QString device = md.hasMatch() ? md.captured(1).trimmed() : QString();
+		if (deviceFile.isEmpty() && !device.isEmpty())
 		{
-			r.device = md.captured(1).trimmed();
+			deviceFile = uvproj;
+			deviceName = device;
 		}
-
-		/* 一块 <IROM> 一个 ROM 区；多目标工程会出现多块，取第一块有 Size 的 */
-		static const QRegularExpression reBlock(
-			QStringLiteral("<IROM>[\\s\\S]*?</IROM>"),
-			QRegularExpression::CaseInsensitiveOption);
-		static const QRegularExpression reSize(
-			QStringLiteral("<Size>\\s*(0[xX][0-9A-Fa-f]+|[0-9]+)\\s*</Size>"),
-			QRegularExpression::CaseInsensitiveOption);
 
 		QRegularExpressionMatchIterator it = reBlock.globalMatch(text);
 		while (it.hasNext())
@@ -173,6 +188,7 @@ Result read(const QString &projRoot)
 			const qint64 v = parseNumber(ms.captured(1));
 			if (v > 0)
 			{
+				r.device     = device;
 				r.flashBytes = v;
 				r.source     = QStringLiteral("Keil 工程 IROM");
 				r.file       = uvproj;
@@ -183,58 +199,76 @@ Result read(const QString &projRoot)
 				return r;
 			}
 		}
+	}
 
-		/* 工程里有型号但没 IROM（新建工程时常见）：退回型号解码 */
-		if (!r.device.isEmpty())
+	/* 工程里有型号但没 IROM（新建工程时常见）：退回型号解码 */
+	if (!deviceFile.isEmpty())
+	{
+		const qint64 v = capacityFromPartNumber(deviceName);
+		if (v > 0)
 		{
-			const qint64 v = capacityFromPartNumber(r.device);
-			if (v > 0)
-			{
-				r.flashBytes = v;
-				r.source     = QStringLiteral("型号解码");
-				r.file       = uvproj;
-				r.detail     = QStringLiteral("%1\n工程里没写 <IROM><Size>，按型号 %2 的容量码推算：%3")
-				                   .arg(uvproj)
-				                   .arg(r.device)
-				                   .arg(formatSize(v));
-				return r;
-			}
+			r.device     = deviceName;
+			r.flashBytes = v;
+			r.source     = QStringLiteral("型号解码");
+			r.file       = deviceFile;
+			r.detail     = QStringLiteral("%1\n工程里没写 <IROM><Size>，按型号 %2 的容量码推算：%3")
+			                   .arg(deviceFile)
+			                   .arg(deviceName)
+			                   .arg(formatSize(v));
+			return r;
 		}
 	}
 
 	/* ---- 2. CubeIDE / Makefile：链接脚本里的 FLASH 区长度 ---- */
-	const QString ld = findFirst(dir, QStringList() << QStringLiteral("*.ld"));
-	if (!ld.isEmpty())
+	/*
+	 * 同样可能有多个 .ld：CubeIDE 生成 _FLASH.ld + _RAM.ld，有的工程还留着
+	 * 旧版链接脚本，其中只描述 RAM。排在前面的那个可能根本没有 FLASH 区，
+	 * 所以不能只看第一个文件，要逐个找"带 FLASH 且长度大于 0"的。
+	 *
+	 * LENGTH 可能写成十进制、带 K/M 单位，也可能直接写十六进制
+	 * （0x80000）。原来只认十进制，遇到十六进制会匹配到开头的 "0"，
+	 * 算出 0 又不报错，等于悄悄忽略了一个完全合格的链接脚本。
+	 */
+	static const QRegularExpression reLd(
+		QStringLiteral("FLASH\\s*\\([^)]*\\)\\s*:\\s*ORIGIN\\s*=\\s*0[xX][0-9A-Fa-f]+\\s*,"
+		               "\\s*LENGTH\\s*=\\s*(0[xX][0-9A-Fa-f]+|[0-9]+)\\s*([KMG])?"),
+		QRegularExpression::CaseInsensitiveOption);
+
+	const QFileInfoList ldFiles = dir.entryInfoList(QStringList() << QStringLiteral("*.ld"),
+	                                                QDir::Files, QDir::Name);
+	for (const QFileInfo &fi : ldFiles)
 	{
-		const QString text = readText(ld);
-		static const QRegularExpression reLd(
-			QStringLiteral("FLASH\\s*\\([^)]*\\)\\s*:\\s*ORIGIN\\s*=\\s*0[xX][0-9A-Fa-f]+\\s*,"
-			               "\\s*LENGTH\\s*=\\s*([0-9]+)\\s*([KMG])?"),
-			QRegularExpression::CaseInsensitiveOption);
-		const QRegularExpressionMatch m = reLd.match(text);
-		if (m.hasMatch())
+		const QString ld = fi.absoluteFilePath();
+		const QRegularExpressionMatch m = reLd.match(readText(ld));
+		if (!m.hasMatch())
 		{
-			qint64 v = m.captured(1).toLongLong();
-			const QString unit = m.captured(2).toUpper();
-			if (unit == QLatin1String("K"))
-			{
-				v *= 1024;
-			}
-			else if (unit == QLatin1String("M"))
-			{
-				v *= 1024 * 1024;
-			}
-			if (v > 0)
-			{
-				r.flashBytes = v;
-				r.source     = QStringLiteral("链接脚本 FLASH");
-				r.file       = ld;
-				r.detail     = QStringLiteral("%1\nFLASH 区 LENGTH = %2%3")
-				                   .arg(ld)
-				                   .arg(m.captured(1))
-				                   .arg(m.captured(2));
-				return r;
-			}
+			continue;
+		}
+
+		qint64 v = parseNumber(m.captured(1));
+		const QString unit = m.captured(2).toUpper();
+		if (unit == QLatin1String("K"))
+		{
+			v *= 1024;
+		}
+		else if (unit == QLatin1String("M"))
+		{
+			v *= 1024 * 1024;
+		}
+		else if (unit == QLatin1String("G"))
+		{
+			v *= 1024LL * 1024 * 1024;
+		}
+		if (v > 0)
+		{
+			r.flashBytes = v;
+			r.source     = QStringLiteral("链接脚本 FLASH");
+			r.file       = ld;
+			r.detail     = QStringLiteral("%1\nFLASH 区 LENGTH = %2%3")
+			                   .arg(ld)
+			                   .arg(m.captured(1))
+			                   .arg(m.captured(2));
+			return r;
 		}
 	}
 

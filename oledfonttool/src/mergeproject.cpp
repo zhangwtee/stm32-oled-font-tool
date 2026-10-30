@@ -1128,23 +1128,49 @@ bool revert(const QStringList &files, QString *err)
 		{
 			continue;
 		}
-		if (!QFile::remove(f))
+
+		/* 目标被人删了、只剩备份：直接把备份放回去。
+		 * 老实现先 remove(f) 再 copy，f 不存在时 remove 就失败，
+		 * 于是"文件被删了"反而撤销不了，明明备份还在。 */
+		if (!QFileInfo::exists(f))
+		{
+			if (!QFile::rename(bak, f))
+			{
+				if (err)
+				{
+					*err = QStringLiteral("还原失败：%1 -> %2").arg(bak, f);
+				}
+				return false;
+			}
+			continue;
+		}
+
+		/* 先改名再还原，不要「先删后拷」。
+		 * 老写法 QFile::remove(f) 成功、QFile::copy(bak, f) 失败
+		 * （磁盘满、杀软锁目录、备份被占用）时，用户原来的文件已经没了，
+		 * 备份又没拷回来 —— 一次撤销把源码删干净。
+		 * 改名不丢数据：把原文件挪到 .oledtmp 占着位置，备份 rename 上来；
+		 * 中间任何一步失败都还能把 .oledtmp 改回去。 */
+		const QString tmp = f + QStringLiteral(".oledtmp");
+		QFile::remove(tmp);        /* 上一轮崩在中间留下的残留 */
+		if (!QFile::rename(f, tmp))
 		{
 			if (err)
 			{
-				*err = QStringLiteral("删不掉 %1，可能被 Keil 占用了").arg(f);
+				*err = QStringLiteral("改不动 %1，可能被 Keil 占用了").arg(f);
 			}
 			return false;
 		}
-		if (!QFile::copy(bak, f))
+		if (!QFile::rename(bak, f))
 		{
+			QFile::rename(tmp, f); /* 还原失败就把原文件放回去，别让人两头空 */
 			if (err)
 			{
-				*err = QStringLiteral("还原失败：%1 -> %2").arg(bak, f);
+				*err = QStringLiteral("还原失败：%1 -> %2（原文件已放回）").arg(bak, f);
 			}
 			return false;
 		}
-		QFile::remove(bak);
+		QFile::remove(tmp);
 	}
 	return true;
 }
