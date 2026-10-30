@@ -210,7 +210,7 @@ Say "   cmake  : $cmake"
 Say "   ninja  : $ninja"
 Say ''
 
-# ---- [1/5] 环境自检 ----
+# ---- [1/6] 环境自检 ----
 Say '[1/6] 环境自检...'
 foreach ($item in @(
     @{ n = 'vcvars64.bat'; p = $vcvars },
@@ -223,7 +223,7 @@ foreach ($item in @(
     Say "      OK  $($item.n)"
 }
 
-# ---- [2/5] 载入 MSVC 环境 ----
+# ---- [2/6] 载入 MSVC 环境 ----
 Say '[2/6] 载入 MSVC 环境...'
 $vcOut = & cmd.exe /c "`"$vcvars`" >nul 2>&1 && set" 2>&1
 if ($LASTEXITCODE -ne 0) {
@@ -240,7 +240,44 @@ if (-not $cl) {
 }
 Say "      OK  cl.exe -> $($cl.Source)"
 
-# ---- [3/5] CMake 配置 ----
+# cl.exe 在，不等于 SDK 的工具也在，所以这里必须单独验证 rc.exe。
+# 原因：MSVC 的路径是 vcvars 按脚本自身位置推出来的，不碰注册表；而 Windows SDK
+# 的路径要靠 vsdevcmd 的 ext 脚本用 reg query 查注册表拿到，再塞进 PATH。那一步
+# 一旦失败（reg.exe 被安全策略拦、SDK 装得不全），cl.exe 照样能找到，但 rc.exe /
+# mt.exe 不在 PATH 里。CMake 试探编译到最后要编 manifest，找不到 rc 就判定编译器
+# 坏了，报成 "The C++ compiler ... is broken" —— 跟 cl.exe 一点关系都没有，
+# 对着那句话排查会走很远。宁可在这里当场停下，把话说准。
+$rc = Get-Command rc.exe -ErrorAction SilentlyContinue
+if (-not $rc) {
+    Say '      FAIL 找不到 rc.exe'
+    Say ''
+    Say '  cl.exe 在，说明 MSVC 本身没问题；缺的是 Windows SDK 的工具目录'
+    Say '  （通常在 C:\Program Files (x86)\Windows Kits\10\bin\<版本>\x64）。'
+    Say ''
+    Say '  可能的原因：'
+    Say '    1. Windows SDK 没装，或只装了头文件/库、没装命令行工具'
+    Say '    2. vcvars64.bat 查注册表失败 —— 它的输出被 >nul 2>&1 吞掉了，上面看不出来'
+    Say '       （安全软件或策略拦截 reg.exe 时就是这种表现）'
+    Say '    3. PATH 里有别的 rc.exe 抢先匹配（少见）'
+    Say ''
+    Say '  排查：开一个普通 cmd 窗口，依次执行'
+    Say '        "<vcvars64.bat 的完整路径>"'
+    Say '        where rc.exe'
+    Say '  能列出来，就说明是本机工具链环境的问题，与本工程代码无关。'
+    Say ''
+    Die '载入 MSVC 环境后找不到 rc.exe（Windows SDK 未正确载入）'
+}
+Say "      OK  rc.exe  -> $($rc.Source)"
+
+# mt.exe 只在生成 manifest 时用到，缺了 Ninja 一般也能过，提示一句就够。
+$mt = Get-Command mt.exe -ErrorAction SilentlyContinue
+if ($mt) {
+    Say "      OK  mt.exe  -> $($mt.Source)"
+} else {
+    Say '      警告 mt.exe 未找到（manifest 工具，一般不影响构建）'
+}
+
+# ---- [3/6] CMake 配置 ----
 Say '[3/6] CMake 配置...'
 Add-Content -LiteralPath $log -Value ''
 Add-Content -LiteralPath $log -Value '--- CMake 配置 ---'
@@ -252,7 +289,7 @@ if ($LASTEXITCODE -ne 0) {
     Die "CMake 配置失败 (exit=$LASTEXITCODE)"
 }
 
-# ---- [4/5] 编译 ----
+# ---- [4/6] 编译 ----
 Say '[4/6] 编译...'
 Add-Content -LiteralPath $log -Value ''
 Add-Content -LiteralPath $log -Value '--- 编译 ---'

@@ -707,3 +707,26 @@ GIF 里重复帧很多（静止段落、循环图标首尾）。第一反应是"
 窗口高度也要按目标屏收：第二屏是 1600×900，客户区 890 + 标题栏约 39 = 929，
 底边会跑到屏幕外。所以 `buildUi` 里按 `availableGeometry().height() - 90` 收一下，
 放不下的部分交给滚动区 —— 滚动区本来就是为这种情况做的。
+
+**53. `cl.exe` 找得到，不代表 `rc.exe` 找得到**
+
+CMake 报 `The C++ compiler ... is broken` 时，别急着怀疑 C++ 编译器 —— 这句话经常是冤枉的。
+
+链条是这样的：
+
+- `cl.exe` 的路径由 `vcvars64.bat` 按**脚本自身位置**往上推出来，不查注册表。
+- Windows SDK 的路径不行，必须由 `vsdevcmd\ext\netfxsdk.bat` 和 `ext\vcvars\vcvars140.bat`
+  用 `reg query` 查注册表拿到，再塞进 `PATH`。
+- 所以注册表那一步失败时（`reg.exe` 被安全软件或组策略拦、SDK 只装了头文件和库没装工具），
+  `cl.exe` 照样在，`rc.exe` 和 `mt.exe` 却不在 `PATH` 里。
+- CMake 试探编译的最后一步要编 manifest，`--rc=rc` 是裸名只能靠 `PATH` 找，找不到就
+  判定编译器坏了。日志里同一行的 `--mt=CMAKE_MT-NOTFOUND` 是同一个病：`mt.exe` 也缺。
+
+而 `build.ps1` 载入 vcvars 的那句是 `cmd /c "vcvars64.bat >nul 2>&1 && set"` ——
+`>nul 2>&1` 把 vcvars 自己的报错吞了，退出码还是 0，脚本以为成功了，于是错误一路拖到 CMake
+才爆，还爆在错误的地方。
+
+现在 `[2/6]` 载入环境之后单独 `Get-Command rc.exe` 验一遍，不在就当场停下，直说
+"Windows SDK 未正确载入"，不再让 CMake 去误报成编译器故障。
+
+（2026-10-30 实测：执行环境把 `reg.exe` 列进程序禁用名单，稳定复现这个现象。）
