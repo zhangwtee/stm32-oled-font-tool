@@ -219,6 +219,20 @@ QString ImageGen::renderHeader(const QVector<QVector<quint8>> &frames,
     const int dataCount = unique.size();
     const bool deduped  = (dataCount < count);
 
+    /*
+     * 帧号用多宽的类型。
+     *
+     * 原来一律写 uint8_t，而界面上最多可以导出 600 帧，于是：
+     *   ① Anim_ShowFrame(300) 传进来先被截成 44，第 256 帧以后永远看不到；
+     *   ② 头文件里那段示例 for (uint8_t i = 0; i < ANIM_COUNT; i++) 在
+     *      ANIM_COUNT=600 时根本退不出去 —— i 到 255 回绕成 0，死循环；
+     *   ③ 去重映射表 Anim_Map[] 存的是数据帧号，去重后仍可能超过 255。
+     * 帧数不超过 255 时继续用 uint8_t，输出和以前逐字节相同。
+     */
+    const bool wideIndex = (count > 255) || (dataCount > 255);
+    const QString idxType = wideIndex ? QStringLiteral("uint16_t")
+                                      : QStringLiteral("uint8_t");
+
     QString s;
     s += QStringLiteral("/* ============================================================\n");
     s += QStringLiteral(" *  %1\n").arg(
@@ -260,7 +274,7 @@ QString ImageGen::renderHeader(const QVector<QVector<quint8>> &frames,
     s += QStringLiteral(" *  用法（只在一个 .c 里 include 本文件，多个 .c 包含会重复定义数组）：\n");
     if (count > 1)
     {
-        s += QStringLiteral(" *      uint8_t i;\n");
+        s += QStringLiteral(" *      %1 i;\n").arg(idxType);
         s += QStringLiteral(" *      while (1) {\n");
         s += QStringLiteral(" *          for (i = 0; i < ANIM_COUNT; i++) {\n");
         s += QStringLiteral(" *              Anim_ShowFrame(i);\n");
@@ -356,7 +370,7 @@ QString ImageGen::renderHeader(const QVector<QVector<quint8>> &frames,
     {
         s += QStringLiteral("/* 逻辑帧号 -> 数据帧号。重复的帧指向同一份数据，逐帧重刷画面一样，\n");
         s += QStringLiteral(" * 所以播放写法和没有重复帧时完全一致。 */\n");
-        s += QStringLiteral("static const uint8_t Anim_Map[ANIM_COUNT] =\n{\n");
+        s += QStringLiteral("static const %1 Anim_Map[ANIM_COUNT] =\n{\n").arg(idxType);
         for (int f = 0; f < count; f += 16)
         {
             s += QStringLiteral("    ");
@@ -376,7 +390,7 @@ QString ImageGen::renderHeader(const QVector<QVector<quint8>> &frames,
 
     s += QStringLiteral("/* 把第 i 帧整屏刷到屏上。自己发三条定位命令，不依赖驱动里的设光标函数，\n");
     s += QStringLiteral(" * 也就绕开了各种例程参数顺序（页在前 / 列在前）不一致的问题。 */\n");
-    s += QStringLiteral("static ANIM_UNUSED void Anim_ShowFrame(uint8_t i)\n");
+    s += QStringLiteral("static ANIM_UNUSED void Anim_ShowFrame(%1 i)\n").arg(idxType);
     s += QStringLiteral("{\n");
     s += QStringLiteral("    const uint8_t *f;\n");
     s += QStringLiteral("    uint8_t page;\n");

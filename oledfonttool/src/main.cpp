@@ -588,7 +588,8 @@ static QStringList collectStringLiterals(const QString &src)
 	return out;
 }
 
-/* 判断 s 的第 i 位开始是不是 "0x"/"0X" + 两个十六进制数字（也就是一个字节的字面量） */static bool isHexPair(const QString &s, int i)
+/* 判断 s 的第 i 位开始是不是 "0x"/"0X" + 两个十六进制数字（也就是一个字节的字面量） */
+static bool isHexPair(const QString &s, int i)
 {
 	if (i + 3 >= s.size())            return false;
 	if (s.at(i) != QLatin1Char('0'))  return false;
@@ -667,6 +668,12 @@ private:
 	void togglePlayback();
 	void updateImageInfo();
 	ImageGen::Options imageOptions() const;
+	/* 抽帧步长（每 N 帧取 1）。抽掉帧以后每帧该停留的时间要跟着放大，
+	 * 否则 30 fps 的 GIF 抽成每 4 帧取 1 会变成 120 fps 一样快。 */
+	int frameStep() const;
+	int effectiveDelayMs() const;
+	/* 「屏」下拉选 32 行时，把图片页的目标尺寸跟到 128×32 */
+	void syncImageSizeToScreen();
 
 	/* ---- 烧录自检帧 ---- */
 	void showSelfTest();
@@ -690,6 +697,9 @@ private:
 	void   readChip();
 	void   updateChipNote();
 	qint64 flashCapacity() const;
+	/* 换工程（手动指定、导入字库、导出时临时选目录）之后，把所有"按工程读一次"
+	 * 的结论统一重算：屏控制器、芯片容量、状态栏占比、图片页的容量提示。 */
+	void   refreshProjectFacts();
 
 	FontGen m_gen;
 	QPlainTextEdit *m_text;
@@ -938,6 +948,10 @@ void MainWindow::buildUi()
 	connect(m_screenBox, &QComboBox::currentIndexChanged, this,
 	        &MainWindow::updateScreenNote);
 
+	/* 屏高变了，图片页的目标尺寸也要跟过去（两张页面的尺寸是同一件事） */
+	connect(m_screenHBox, QOverload<int>::of(&QComboBox::currentIndexChanged),
+	        this, [this](int) { syncImageSizeToScreen(); });
+
 	m_asciiFont = new QCheckBox(QStringLiteral("统计时包含 ASCII 字库(1520B)"), boxOut);
 	m_asciiFont->setChecked(true);
 	outLayout->addWidget(m_asciiFont);
@@ -1165,6 +1179,8 @@ void MainWindow::buildUi()
 		if (!path.isEmpty())
 		{
 			m_headerPath = path;
+			/* 存到别处可能就换到另一个工程了，屏型号和容量要跟着重判 */
+			refreshProjectFacts();
 			/* 传 false：路径刚在这里选过，exportHeader 不要再弹对话框 */
 			exportHeader(false);
 		}
@@ -1294,6 +1310,9 @@ QWidget *MainWindow::buildImagePage()
 		recomputeImage();
 	});
 
+	/* 初始尺寸跟着「屏」下拉走（0.91" 屏时默认就是 128×32） */
+	syncImageSizeToScreen();
+
 	updateImageInfo();
 	return splitter;
 }
@@ -1311,6 +1330,45 @@ ImageGen::Options MainWindow::imageOptions() const
 	return opt;
 }
 
+int MainWindow::frameStep() const
+{
+	return m_imgStep ? qMax(1, m_imgStep->currentData().toInt()) : 1;
+}
+
+/* 一帧该停留多久。
+ * 抽帧把 4 帧合成 1 帧，这 1 帧就得停 4 倍时间，否则整体播放速度会变成 4 倍。
+ * 原来导出时直接写 GIF 的原始延时，抽帧越多动画越快 —— 帧数和时长都对不上，
+ * 而用户看到的是"导出以后动画快得离谱"，很难联想到是抽帧这一步。 */
+int MainWindow::effectiveDelayMs() const
+{
+	return qMax(1, m_imgDelayMs) * frameStep();
+}
+
+/* 「屏」下拉在文字页，图片页的目标尺寸在另一页，两边本来就该一致。
+ * 0.91" 的屏是 128×32，图片页却固定默认 128×64，导出的 anim.h 会往后
+ * 4 页灌数据 —— 烧进去只显示上半截，看着像"驱动少写了半屏"。
+ * 所以选 32 行时把图片页尺寸跟过去。
+ * 只在当前正好是另一档 128 宽时才跟：用户特意选了 64×64 / 16×16 是在做图标，
+ * 不该被抢掉。 */
+void MainWindow::syncImageSizeToScreen()
+{
+	if (!m_imgSize)
+	{
+		return;
+	}
+	const QPoint want = (currentScreenH() == 32) ? QPoint(128, 32) : QPoint(128, 64);
+	const QPoint cur  = m_imgSize->currentData().toPoint();
+	if (cur == want || cur.x() != 128)
+	{
+		return;
+	}
+	const int idx = m_imgSize->findData(want);
+	if (idx >= 0)
+	{
+		m_imgSize->setCurrentIndex(idx);     /* 会触发 recomputeImage */
+	}
+}
+
 void MainWindow::loadImageFile()
 {
 	const QString path = QFileDialog::getOpenFileName(
@@ -1326,14 +1384,38 @@ void MainWindow::loadImageFile()
 	reader.setDecideFormatFromContent(true);
 
 	/* GIF 会有多帧；静态图片只有 1 帧。
-	 * 帧数上限设 600 —— 再多既没意义也吃内存。 */
+	 * 帧数上限设 600 —— 再多既没意义也吃内存。
+	 *
+	 * 但 600 帧本身也够呛：每一帧都按原分辨率留在 m_imgSource 里，
+	 * 一帧 QImage 占 宽×高×4 字节，1920×1080 的 GIF 600 帧就是 5GB，
+	 * 直接把机器拖死（还没算后面逐帧转换的临时内存）。
+	 * 所以再按 400MB 预算反推能留几帧，超了只读前面一段，
+	 * 并在文件名下面写清楚"只读了前 N 帧"，不假装全读进来了。 */
+	const qint64 kMemBudget = 400LL * 1024 * 1024;
+
 	QVector<QImage> frames;
 	int firstDelay = 0;
+	int totalFrames = 0;        /* 文件里实际有多少帧 */
+	bool cappedByMemory = false;
 
 	const int count = reader.imageCount();
 	if (count > 1)
 	{
-		const int limit = qMin(count, 600);
+		totalFrames = count;
+		int limit = qMin(count, 600);
+
+		const QSize raw = reader.size();
+		const qint64 perFrame = qint64(raw.width()) * qint64(raw.height()) * 4;
+		if (perFrame > 0)
+		{
+			const qint64 fit = kMemBudget / perFrame;
+			if (fit < limit)
+			{
+				limit = int(qMax<qint64>(1, fit));
+				cappedByMemory = true;
+			}
+		}
+
 		for (int i = 0; i < limit; ++i)
 		{
 			const QImage img = reader.read();
@@ -1358,6 +1440,7 @@ void MainWindow::loadImageFile()
 		if (!img.isNull())
 		{
 			frames.append(img);
+			totalFrames = 1;
 		}
 	}
 
@@ -1373,11 +1456,18 @@ void MainWindow::loadImageFile()
 	m_imgSource = frames;
 	m_imgDelayMs = (firstDelay > 0) ? firstDelay : 100;
 
-	m_imgFileLabel->setText(QStringLiteral("%1\n（共 %2 帧，原尺寸 %3×%4）")
-	                        .arg(QFileInfo(path).fileName())
-	                        .arg(frames.size())
-	                        .arg(frames.first().width())
-	                        .arg(frames.first().height()));
+	QString fileInfo = QStringLiteral("%1\n（%2 帧，原尺寸 %3×%4）")
+	                       .arg(QFileInfo(path).fileName())
+	                       .arg(frames.size())
+	                       .arg(frames.first().width())
+	                       .arg(frames.first().height());
+	if (cappedByMemory)
+	{
+		fileInfo += QStringLiteral("\n⚠ 文件共 %1 帧，超出内存预算，只读了前 %2 帧")
+		                .arg(totalFrames)
+		                .arg(frames.size());
+	}
+	m_imgFileLabel->setText(fileInfo);
 
 	recomputeImage();
 }
@@ -1408,11 +1498,13 @@ void MainWindow::recomputeImage()
 		m_imgMono.append(ImageGen::unpackFromDisplay(bytes, opt.width, opt.height));
 	}
 
-	m_imgPreview->setFrames(m_imgMono, m_imgDelayMs);
+	/* 预览也按"抽帧后的真实速度"播，否则屏上看着快、烧进去却慢（或反过来） */
+	const int delay = effectiveDelayMs();
+	m_imgPreview->setFrames(m_imgMono, delay);
 
 	if (m_imgMono.size() > 1)
 	{
-		m_imgTimer->setInterval(qMax(20, m_imgDelayMs));
+		m_imgTimer->setInterval(qMax(20, delay));
 	}
 
 	updateImageInfo();
@@ -1469,7 +1561,8 @@ void MainWindow::updateImageInfo()
 		hint  = QStringLiteral("占用偏大，建议减小尺寸或加大抽帧");
 	}
 
-	const double fps = (m_imgDelayMs > 0) ? (1000.0 / m_imgDelayMs) : 0.0;
+	const int delay = effectiveDelayMs();
+	const double fps = (delay > 0) ? (1000.0 / delay) : 0.0;
 	const double secs = (fps > 0) ? (frames / fps) : 0.0;
 
 	/* 分几段拼，不用 %10 %11 —— arg() 对两位数占位符的处理容易踩到
@@ -1485,9 +1578,16 @@ void MainWindow::updateImageInfo()
 	            .arg(ChipInfo::formatSize(cap))
 	            .arg(QStringLiteral("%1%").arg(pct, 0, 'f', 1));
 	html += QStringLiteral("帧延时 %1 ms（约 %2 fps），可播 %3 秒")
-	            .arg(m_imgDelayMs)
+	            .arg(delay)
 	            .arg(fps, 0, 'f', 1)
 	            .arg(secs, 0, 'f', 1);
+	if (frameStep() > 1)
+	{
+		/* 抽帧以后延时是放大过的，把原始值也说清楚，免得用户以为工具算错 */
+		html += QStringLiteral("<br/>已抽帧：每 %1 帧取 1，延时按 ×%1 放大（GIF 原始 %2 ms）")
+		            .arg(frameStep())
+		            .arg(m_imgDelayMs);
+	}
 
 	m_imgInfo->setText(html);
 }
@@ -1505,7 +1605,7 @@ void MainWindow::togglePlayback()
 	}
 	else
 	{
-		m_imgTimer->start(qMax(20, m_imgDelayMs));
+		m_imgTimer->start(qMax(20, effectiveDelayMs()));
 		m_imgPlayBtn->setText(QStringLiteral("暂停"));
 	}
 }
@@ -1534,7 +1634,7 @@ void MainWindow::exportAnimHeader()
 	}
 
 	const ImageGen::Options opt = imageOptions();
-	const QString content = ImageGen::renderHeader(m_imgPacked, opt, m_imgDelayMs,
+	const QString content = ImageGen::renderHeader(m_imgPacked, opt, effectiveDelayMs(),
 	                                               QFileInfo(m_imgPath).fileName());
 
 	QFile file(path);
@@ -2178,14 +2278,9 @@ void MainWindow::chooseProjectDir()
 	/* 换工程了，编码检查的对象也变了，重新跑一次 */
 	checkSourceEncoding(false);
 
-	/* 屏型号也是按工程判的，换了工程就得重判 */
-	m_probeDone = false;
-	reprobeScreen();
-
-	/* 芯片容量同样是按工程读的，换工程要重读，否则还在按上一个工程的 Flash 算占比 */
-	readChip();
-	updateStatus();
-	updateImageInfo();
+	/* 屏型号、芯片容量同样是按工程判的，换了工程就得重判，
+	 * 否则还在按上一个工程的 Flash 算占比 */
+	refreshProjectFacts();
 }
 
 void MainWindow::refreshPreview()
@@ -2520,6 +2615,19 @@ void MainWindow::readChip()
 	updateChipNote();
 }
 
+/* 换工程之后，"按工程读一次"的结论全部失效：屏控制器、芯片容量、
+ * 状态栏占比、图片页的容量提示。之前只在构造函数里做一遍，
+ * 用户中途换工程（手动指定 / 导入别人工程的字库 / 导出时选别的目录）
+ * 之后，界面还在拿上一个工程的数字说话，而且没有任何提示。 */
+void MainWindow::refreshProjectFacts()
+{
+	m_probeDone = false;
+	reprobeScreen();
+	readChip();
+	updateStatus();
+	updateImageInfo();
+}
+
 /* 下拉第 0 项的文字跟着自动结果走，选它就是"用读到的值" */
 void MainWindow::updateChipNote()
 {
@@ -2561,6 +2669,12 @@ void MainWindow::exportHeader(bool askForPath)
 {
 	const QString srcText = m_text->toPlainText();
 	QString err;
+
+	/* 面板上那个字节数是按「是否包含 ASCII 字库」的勾选算的，导出提示里必须同口径。
+	 * 原来这里写死 false（不含），于是同一个屏幕上两个数字差 1520 字节，
+	 * 用户会以为哪个算错了。 */
+	const qint64 totalBytes = FontGen::flashBytes(m_preview->glyphCount(), m_gen.size(),
+	                                             m_asciiFont->isChecked());
 
 	/* 第一次导出前才去读驱动源码 —— 构造函数里读的话，工程路径可能还没定 */
 	if (!m_probeDone)
@@ -2736,6 +2850,11 @@ void MainWindow::exportHeader(bool askForPath)
 			m_headerPath = picked;
 		}
 
+		/* 目录是这一刻才定下来的，所以芯片容量、屏控制器都要按新工程重来一遍。
+		 * 否则状态栏还在按上一个工程（或者 64KB 估算）说话，
+		 * 而用户刚选完目录，看到的正是那一行。 */
+		refreshProjectFacts();
+
 		/* 导出过的目录记下来，下次启动直接用它 */
 		QSettings().setValue(QStringLiteral("export/lastDir"),
 		                     QFileInfo(m_headerPath).absolutePath());
@@ -2805,7 +2924,7 @@ void MainWindow::exportHeader(bool askForPath)
 				.arg(savedTo)
 				.arg(installer)
 				.arg(m_preview->glyphCount())
-				.arg(FontGen::flashBytes(m_preview->glyphCount(), m_gen.size(), false)));
+				.arg(totalBytes));
 			return;
 		}
 
@@ -2979,7 +3098,7 @@ void MainWindow::exportHeader(bool askForPath)
 	                         .arg(m_headerPath)
 	                         .arg(m_gen.size())
 	                         .arg(m_preview->glyphCount())
-	                         .arg(FontGen::flashBytes(m_preview->glyphCount(), m_gen.size(), false))
+	                         .arg(totalBytes)
 	                         .arg(sizeNote));
 
 	/* 导出成功后顺便检查一下工程源码的编码。
@@ -3038,6 +3157,11 @@ void MainWindow::importHeader()
 	m_pathLabel->setToolTip(path);
 	m_headerPath = path;
 
+	/* 导入的可能是别的工程的字库 —— 屏控制器、芯片容量、源码编码都跟着变。
+	 * 这些以前要重启程序才更新，用户会以为"工具认的还是原来那个工程"。 */
+	refreshProjectFacts();
+	checkSourceEncoding(false);
+
 	const int before = FontGen::glyphCount(current);
 	const int after = FontGen::glyphCount(merged);
 	const int added = FontGen::glyphCount(text);
@@ -3059,6 +3183,18 @@ void MainWindow::importHeader()
 int main(int argc, char *argv[])
 {
 	QApplication app(argc, argv);
+
+	/* 组织名必须先设。
+	 * QSettings 的默认构造函数用 organizationName() + applicationName()
+	 * 拼存储路径（Windows 是 HKEY_CURRENT_USER\Software\<组织>\<应用>）。
+	 * 组织名为空时 Qt 直接判定为 AccessError —— fileName() 返回空字符串，
+	 * setValue() 静默丢弃、value() 永远读回空值，不报错也不警告。
+	 *
+	 * 这曾经导致「点了『更改』指定工程目录，下次启动又忘」「记住上次导出目录」
+	 * 两个功能完全失效，而且失效得没有任何痕迹：代码逻辑看着都对，
+	 * 只是值存不进去。实测确认：没有这一行时 status=1(AccessError)、
+	 * 写进去读不回来；加上之后 status=0、读写正常。 */
+	app.setOrganizationName(QStringLiteral("OLEDFontTool"));
 	app.setApplicationName(QStringLiteral("OLED 汉字取模工具"));
 
 	/* 强制用 Fusion 风格 + 浅色调色板。

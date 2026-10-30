@@ -817,3 +817,91 @@ Qt 的多参数 `arg()` 是**单次扫描**：一次把所有 `%1` 都换成第�
 
 （附带一条：`QString::arg` 的单次扫描特性意味着参数里若含 `%2` 不会被二次解析，
 这是好事；但反过来，重复编号会静默替换，不报错，只能靠肉眼。）
+
+## 界面与导出逻辑（第二轮逐函数复查）
+
+上一轮只做了交叉检查，这一轮把 `main.cpp` 3094 行逐函数过了一遍，
+另外补看了 `imagegen.cpp` 的生成侧。找到 5 个真问题，全部实测确认过。
+
+### QSettings 一个值都没存进去
+
+`main()` 只调了 `setApplicationName()`，没调 `setOrganizationName()`。
+QSettings 的默认构造函数拿 `organizationName() + applicationName()` 拼存储路径，
+组织名为空时 Qt 直接判 AccessError：`fileName()` 返回空串，`setValue()`
+静默丢弃，`value()` 永远读回空值 —— 不报错、不警告、status 之外没有任何痕迹。
+
+后果是「点『更改』指定工程目录，以后就记住」和「记住上次导出目录」两个功能
+从来没生效过，每次启动都在重新猜。代码逻辑逐行看都是对的，坏在环境初始化。
+
+用 `tests/qsettings_probe.cpp` 复现（只写自己那组键，跑完自己删掉）：
+
+    没有 setOrganizationName：fileName=""  status=1(AccessError)  读回 Invalid
+    加上 setOrganizationName：fileName="HKEY_CURRENT_USER\Software\OLEDFontTool\..."  status=0  读写正常
+
+写 Qt 程序时，只要用到 QSettings，`setOrganizationName` 和
+`setApplicationName` 必须成对出现。少了组织名不会崩，只会静默不存。
+
+### 动画超过 255 帧，帧号截断 + 示例死循环
+
+界面上限允许导出 600 帧，而 `imagegen` 生成的：
+
+    static void Anim_ShowFrame(uint8_t i)          // 参数 8 位
+    static const uint8_t Anim_Map[ANIM_COUNT];     // 映射表 8 位
+
+三个后果：
+- `Anim_ShowFrame(299)` 进函数先截成 43，第 256 帧以后永远看不到；
+- 头文件里那段示例 `for (uint8_t i = 0; i < ANIM_COUNT; i++)`，ANIM_COUNT=300 时
+  i 到 255 回绕成 0，**永远退不出去**；
+- 去重后的 `Anim_Map[]` 存的是数据帧号，去重后仍可能 >255，值本身溢出。
+
+改成按帧数选类型：`count > 255 || dataCount > 255` 时用 `uint16_t`，
+否则仍是 `uint8_t` —— 不超过 255 帧时输出和以前逐字节相同，
+老工程重新导出不会被搅动。
+
+验收方式：`tests/compile_anim_300.c` 配 300 帧头文件 `cl /W4` 编译并运行。
+旧头文件同一份程序退出码 7（`Anim_ShowFrame(300)` 被截成 44，越界写出去了），
+新头文件退出码 0。
+
+### 抽帧以后延时没放大
+
+抽帧把 4 帧合成 1 帧，这一帧就该停 4 倍时间。原来 `ANIM_DELAY_MS` 直接写 GIF
+的原始延时，于是抽 4 帧 = 播放快 4 倍，预览也快 4 倍（timer 间隔同样没乘）。
+用户看到的是"导出以后动画快得离谱"，很难联想到抽帧这一步。
+
+修法：加 `frameStep()` / `effectiveDelayMs()`，导出、预览、占用信息统一用有效延时；
+图片页再补一行说明「已抽帧：每 N 帧取 1，延时按 ×N 放大（GIF 原始 xx ms）」。
+
+### 图片页不跟「屏」下拉
+
+文字页有「屏：64 行 / 32 行」，图片页的目标尺寸却固定默认 128×64。
+0.91" 的屏选 32 行导出字库，再切到图片页导 anim.h，拿到的仍是 64 行数据 ——
+往后 4 页灌进不存在的页地址，屏上只显示上半截，看着像驱动少写了半屏。
+
+修法：`syncImageSizeToScreen()`，选 32 行时把图片页尺寸跟到 128×32；
+只在当前正好是另一档 128 宽时才跟（用户特意选 64×64 / 16×16 是在做图标，不该被抢）。
+
+### 换工程以后不重读
+
+芯片容量、屏控制器、源码编码都是"按工程读一次"的结论，但只在构造函数里做过。
+用户中途换工程（手动指定目录 / 导入别人工程的字库 / 导出时临时选目录 / 另存为到
+别处）之后，状态栏还在按上一个工程说话，且没有任何提示。
+
+修法：收成一个 `refreshProjectFacts()`（重探屏 + 重读容量 + 刷状态栏和图片页提示），
+四个换工程的入口统一调用。
+
+### 顺带三处小的
+
+- 导出提示里的字节数写死 `flashBytes(..., false)`（不含 ASCII），
+  和左侧面板按勾选算的差 1520 字节，同一个屏幕上两个数字对不上。改成同一口径。
+- `loadImageFile` 把 600 帧全按原分辨率留在内存里：1920×1080 的 GIF 就是 5GB，
+  真能把机器拖死。加 400MB 预算上限，超了只读前 N 帧并在文件名下写明。
+- `updateImageInfo` 里"可播几秒"用的是未放大的延时，抽帧后同样偏小。
+
+### 复查过、确认没问题的
+
+- `bytes * 100.0 / cap`：`flashCapacity()` 只会返回 >0（手动值、`ok()` 保证
+  `flashBytes>0`、兜底 64KB），不会除零。
+- 自检帧 `saveTo` 里 `m_gen.size()` / `m_fontBox->currentText()` 和 `buildImage`
+  用的是同一份设置，不会出现"图按 16 点、头文件写 32 点"。
+- `undoBtn` 的 `bak.left(bak.size() - 8)`：`.oledbak` 正好 8 个字符。
+- `isHexPair` 的 `i + 3 >= size` 边界：最后一个字节正好落在 `size-1`，不会越界。

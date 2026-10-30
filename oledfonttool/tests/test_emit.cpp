@@ -260,6 +260,60 @@ int main(int argc, char **argv)
 		writeFile(QDir(outDir).absoluteFilePath(QStringLiteral("anim_dedup.h")), dc);
 	}
 
+	/* ---------------- 帧号位宽（超过 255 帧） ---------------- */
+	std::printf("[超过 255 帧的索引类型]\n");
+	{
+		ImageGen::Options opt;
+		opt.width = 128;
+		opt.height = 32;                     /* 一帧 512 字节，300 帧也就 150KB */
+		const int per = ImageGen::bytesPerFrame(128, 32);
+
+		QVector<QVector<quint8>> many;
+		for (int i = 0; i < 300; ++i)
+		{
+			/* 首两字节带上帧号，保证 300 帧两两不同 —— 否则 256 帧会和 0 帧
+			 * 撞成一样，去重插进来，测的就不是"帧号位宽"这件事了 */
+			QVector<quint8> one(per, quint8(i));
+			one[0] = quint8(i & 0xFF);
+			one[1] = quint8((i >> 8) & 0xFF);
+			many.append(one);
+		}
+		const QString wc = ImageGen::renderHeader(many, opt, 100, QStringLiteral("long.gif"));
+		check("300 帧：帧号用 uint16_t",
+		      wc.contains(QStringLiteral("Anim_ShowFrame(uint16_t i)")));
+		check("300 帧：示例循环也用 uint16_t",
+		      wc.contains(QStringLiteral("uint16_t i;")));
+		check("300 帧：不该再出现 uint8_t 帧号",
+		      !wc.contains(QStringLiteral("uint8_t i")));
+		check("ANIM_COUNT 是 300",
+		      macroValue(wc, QStringLiteral("ANIM_COUNT")) == 300);
+
+		/* 不超过 255 帧时，输出必须和以前逐字节一样 —— 老工程重新导出不该被搅动 */
+		QVector<QVector<quint8>> few;
+		few.append(QVector<quint8>(per, 0x11));
+		few.append(QVector<quint8>(per, 0x22));
+		const QString fc = ImageGen::renderHeader(few, opt, 100, QStringLiteral("a.gif"));
+		check("2 帧：仍然是 uint8_t",
+		      fc.contains(QStringLiteral("Anim_ShowFrame(uint8_t i)"))
+		          && fc.contains(QStringLiteral("uint8_t i;")));
+		check("2 帧：不出现 uint16_t",
+		      !fc.contains(QStringLiteral("uint16_t")));
+
+		/* 映射表里存的是"数据帧号"，也是同一个位宽问题 */
+		QVector<QVector<quint8>> blink;
+		for (int i = 0; i < 300; ++i)
+		{
+			blink.append(QVector<quint8>(per, (i % 2) ? 0x33 : 0x44));
+		}
+		const QString mc = ImageGen::renderHeader(blink, opt, 100, QStringLiteral("blink.gif"));
+		check("去重后 300 帧：映射表也是 uint16_t",
+		      mc.contains(QStringLiteral("static const uint16_t Anim_Map[ANIM_COUNT]")));
+		check("去重后数据帧只剩 2",
+		      macroValue(mc, QStringLiteral("ANIM_DATA_COUNT")) == 2);
+
+		writeFile(QDir(outDir).absoluteFilePath(QStringLiteral("anim_300.h")), wc);
+	}
+
 	/* ---------------- 自检帧 ---------------- */
 	std::printf("[自检帧 OLED_SelfTest.h]\n");
 	{
