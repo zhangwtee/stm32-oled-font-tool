@@ -57,9 +57,23 @@ int main(int argc, char *argv[])
 {
 	QCoreApplication app(argc, argv);
 
+	/* 默认找源码目录下的 fixture。
+	 * 不能只用 applicationDirPath()/fixture —— 那是 CMake 复制到 exe 旁边的副本，
+	 * 而以它作基准算 ../../../ 会比真实工程目录少一层，
+	 * 「真实工程」那 4 个用例就会被静默跳过（看着像过了，其实没跑）。
+	 * 优先用源码目录，退回 exe 旁边的副本，保证从哪跑都一致。 */
 	const QString fixture = (argc > 1)
 	        ? QDir(QString::fromLocal8Bit(argv[1])).absolutePath()
-	        : QDir::currentPath();
+	        : [] () -> QString {
+	              const QString exeDir = QCoreApplication::applicationDirPath();
+	              const QString srcDir = QDir(exeDir).absoluteFilePath(
+	                      QStringLiteral("../fixture"));
+	              if (QFileInfo::exists(srcDir))
+	              {
+	                  return QDir(srcDir).absolutePath();
+	              }
+	              return QDir(exeDir).absoluteFilePath(QStringLiteral("fixture"));
+	          }();
 
 	std::printf("[型号解码]\n");
 	expectPart("STM32F103C8",     64);      /* 中景园最小板 */

@@ -56,3 +56,8 @@ add_custom_command(TARGET test_probe POST_BUILD
     COMMAND ${CMAKE_COMMAND} -E copy_directory
             ${CMAKE_CURRENT_SOURCE_DIR}/fixture
             $<TARGET_FILE_DIR:test_probe>/fixture)
+
+add_custom_command(TARGET test_chip POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -E copy_directory
+            ${CMAKE_CURRENT_SOURCE_DIR}/fixture
+            $<TARGET_FILE_DIR:test_chip>/fixture)
