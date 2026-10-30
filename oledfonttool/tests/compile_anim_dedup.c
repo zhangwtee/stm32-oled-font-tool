@@ -4,8 +4,11 @@
  * 画面每帧看着都对，连着放才发现顺序跳。所以这里不只数写入量，
  * 还要把 Anim_Map 的内容逐项对一遍。
  *
- * 单独一个文件是因为 include guard 和 anim.h 同名（都是 __ANIM_FRAMES_H），
+ * 单独一个文件是因为这里用的是 fixture 里那份**改动前**的头文件，
+ * include guard 还是老的 `__ANIM_FRAMES_H`，和 fixture/anim.h 同门，
  * 同一个翻译单元里不能同时包含两份。
+ * （新导出的头文件按素材名带前缀，guard 是 `__LOGO_FRAMES_H` 这种，
+ *  两份可以放一起 —— 见 compile_two_assets.c。）
  */
 #include <stdint.h>
 

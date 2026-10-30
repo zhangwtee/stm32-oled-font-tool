@@ -1104,6 +1104,21 @@ if (!ident.isEmpty())
   `列表里共 3 份素材：3 帧、3.0 KB（占 4.7%）`；
   勾上「合成一个动画」再导同一批 → 只有一条 `a1 · 3 帧 · 128×64`，
   预览 `1 / 3`；点「移除」列表清空、预览回到占位文字。截图逐张确认过。
+- **编译级验收**（`tests/compile_two_assets.c` + `fixture/logo.h`、`fixture/move.h`，
+  两份都是真实代码 `writeHeaderFile` 生成的）：
+  ```
+  cl /W4 /utf-8 compile_two_assets.c -Ifixture -Fe:out/compile_two_assets.exe -Fo:out/
+  ```
+  一个翻译单元里 `#include "logo.h"` + `#include "move.h"`，还各再包含一次。
+  `/W4` 下**零警告**，运行核对：`LOGO_COUNT=2` / `MOVE_COUNT=3` 各是各的、
+  `sizeof(Logo_Frames)==2*1024`、`sizeof(Move_Frames)==3*1024`、两个数组首字节不等、
+  各自 `ShowFrame` 的写入量按各自帧数算（每帧 1024 字节 / 24 条定位命令）、
+  越界帧不写。`#ifndef __LOGO_FRAMES_H` / `__MOVE_FRAMES_H` 两处也在文件里断言了。
+- 反面样本留着做对照（`fixture/anim.h` + `fixture/anim_dedup.h`，都是改动前的无前缀版）：
+  同一个翻译单元同时 include，`cl /W3` **编译通过、零警告**，跑出来
+  `ANIM_COUNT=1`、`sizeof(Anim_Frames)=1024`、`ANIM_DATA_COUNT` 压根没定义 ——
+  第二份头文件被第一个 guard 整份吃掉，一声不响。这就是"多份素材"在改动前是假的：
+  不是报错，是静默用错数据，最难查的那种。
 - **导出对话框没法自动化**：这台机器上 Qt 用的是新版 `IFileDialog`
   （`DUIViewWndClassName` + DirectUIHWND），文件名框不是枚举得到的 `Edit`
   控件，`WM_SETTEXT` / `CDM_SETCONTROLTEXT` / `BM_CLICK` 全部无效，
