@@ -1,7 +1,12 @@
 #include "imagegen.h"
 
+#include <QCollator>
+#include <QFileInfo>
+#include <QImageReader>
 #include <QPainter>
 #include <QStringList>
+
+#include <algorithm>
 
 /* 4x4 有序抖动矩阵（Bayer）。值 0..15，用来把灰度转成"疏密不同的点" */
 static const int kBay4[4][4] = {
@@ -418,4 +423,184 @@ QString ImageGen::renderHeader(const QVector<QVector<quint8>> &frames,
 
     s += QStringLiteral("#endif /* __ANIM_FRAMES_H */\n");
     return s;
+}
+
+/* ==========================================================================
+ *  读图：单张 / 一次多选
+ *
+ *  为什么放在这里而不是主窗口里：多选要处理的边界（文件名排序、GIF 展开、
+ *  跨文件共用的帧数与内存上限、个别文件读不出来）都不涉及界面，
+ *  单独放一处才好写测试。主窗口只管弹对话框和显示结果。
+ * ========================================================================== */
+
+/* 把一个图片文件读成帧，追加到 out。
+ *
+ *   budgetLeft  剩余内存预算（字节），读完扣减，跨文件共享
+ *   maxFrames   本批次还能收几帧，同样跨文件共享
+ *   fileTotal   回填"这个文件里本来有多少帧"
+ *   delayMs     进来是 0 时按文件里的 GIF 延时填；已经填过就不覆盖
+ *               —— 多张静态图拼动画时整个序列用同一档延时，不会一张快一张慢
+ *   truncated   这个文件没读完
+ *   byCount / byMemory  截断的原因：撞帧数上限 / 内存预算不够。
+ *               界面要靠它说清楚"为什么只读了这么多"，
+ *               否则只能拼出"共 N 帧，只读了前 N 帧"这种自相矛盾的话。
+ *
+ *  返回实际追加的帧数。0 表示这个文件一帧都没贡献（坏了，或预算已耗尽）。 */
+static int readOneFile(const QString &path, QVector<QImage> &out,
+                       qint64 &budgetLeft, int maxFrames,
+                       int &fileTotal, int &delayMs,
+                       bool &truncated, bool &byCount, bool &byMemory)
+{
+    fileTotal = 0;
+    truncated = false;
+    byCount   = false;
+    byMemory  = false;
+
+    if (maxFrames <= 0)
+    {
+        truncated = true;
+        return 0;
+    }
+
+    QImageReader reader(path);
+    reader.setDecideFormatFromContent(true);
+
+    /* 静态图片只有 1 帧，GIF 才有 imageCount() > 1 */
+    const QSize rawSize = reader.size();
+    const qint64 perFrame = (rawSize.width() > 0 && rawSize.height() > 0)
+                                ? qint64(rawSize.width()) * qint64(rawSize.height()) * 4
+                                : 0;
+
+    const int count = reader.imageCount();
+    if (count > 1)
+    {
+        fileTotal = count;
+        int limit = qMin(count, maxFrames);
+        byCount = (count > maxFrames);
+
+        if (perFrame > 0)
+        {
+            const qint64 fit = budgetLeft / perFrame;
+            if (fit < limit)
+            {
+                /* 预算连一帧都放不下时也留一帧：让用户至少看到画面，
+                 * 而不是"选了文件什么都没发生"。截断标记照常置上。 */
+                limit = int(qBound<qint64>(qint64(1), fit, qint64(limit)));
+                byMemory = (limit < count);
+            }
+        }
+        truncated = (limit < count);
+
+        int added = 0;
+        for (int i = 0; i < limit; ++i)
+        {
+            const QImage img = reader.read();
+            if (img.isNull())
+            {
+                break;
+            }
+            if (delayMs <= 0)
+            {
+                const int d = reader.nextImageDelay();
+                if (d > 0)
+                {
+                    delayMs = d;
+                }
+            }
+            out.append(img);
+            ++added;
+            /* 实际尺寸可能和 size() 报的不一样（局部帧），扣预算按真图算 */
+            const qint64 real = qint64(img.width()) * qint64(img.height()) * 4;
+            budgetLeft -= qMax(real, qint64(1));
+        }
+        return added;
+    }
+
+    /* 单帧：整张读一次 */
+    const QImage img = reader.read();
+    if (img.isNull())
+    {
+        return 0;
+    }
+    fileTotal = 1;
+
+    const qint64 need = qint64(img.width()) * qint64(img.height()) * 4;
+    if (need > budgetLeft)
+    {
+        truncated = true;
+        byMemory  = true;
+        return 0;
+    }
+    out.append(img);
+    budgetLeft -= qMax(need, qint64(1));
+    return 1;
+}
+
+ImageGen::FrameBatch ImageGen::loadFrames(const QStringList &paths,
+                                         int maxFrames,
+                                         qint64 budgetBytes)
+{
+    FrameBatch batch;
+
+    QStringList ordered = paths;
+
+    /* 按文件名自然排序 —— frame2 要排在 frame10 前面。
+     * 对话框返回的顺序取决于系统和点选次序，指望不上；
+     * 资源管理器里看着是排好的，直接用字符串比较又会把 10 排到 2 前面。 */
+    if (ordered.size() > 1)
+    {
+        QCollator collator;
+        collator.setNumericMode(true);
+        collator.setCaseSensitivity(Qt::CaseInsensitive);
+        std::stable_sort(ordered.begin(), ordered.end(),
+                         [&collator](const QString &a, const QString &b) {
+                             return collator.compare(QFileInfo(a).fileName(),
+                                                     QFileInfo(b).fileName()) < 0;
+                         });
+    }
+
+    qint64 budget = budgetBytes;
+    batch.files = ordered;
+    batch.limitFrames = maxFrames;
+
+    for (int i = 0; i < ordered.size(); ++i)
+    {
+        if (batch.frames.size() >= maxFrames)
+        {
+            /* 撞到帧数上限：剩下的文件整个不读。
+             * "没读的文件数"要记下来，否则界面只能说"只读了前 N 帧"，
+             * 用户不知道还有多少被跳过了。 */
+            batch.truncated     = true;
+            batch.cappedByCount = true;
+            batch.skippedFiles  = ordered.size() - i;
+            break;
+        }
+
+        int  fileTotal = 0;
+        bool trunc     = false;
+        bool byCount   = false;
+        bool byMemory  = false;
+        const int added = readOneFile(ordered.at(i), batch.frames, budget,
+                                      maxFrames - batch.frames.size(),
+                                      fileTotal, batch.delayMs,
+                                      trunc, byCount, byMemory);
+        batch.totalFrames += fileTotal;
+        if (trunc)
+        {
+            batch.truncated = true;
+        }
+        batch.cappedByCount  = batch.cappedByCount  || byCount;
+        batch.cappedByMemory = batch.cappedByMemory || byMemory;
+
+        if (added == 0)
+        {
+            batch.failed << QFileInfo(ordered.at(i)).fileName();
+            if (budget <= 0)
+            {
+                break;      /* 预算见底，后面的文件也读不进来 */
+            }
+        }
+    }
+
+    return batch;
 }

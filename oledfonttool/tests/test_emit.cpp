@@ -13,9 +13,12 @@
 #include "../src/imagegen.h"
 #include "../src/selftest.h"
 
+#include <QCoreApplication>
 #include <QDir>
 #include <QFile>
+#include <QFileInfo>
 #include <QGuiApplication>
+#include <QImageReader>
 #include <QRegularExpression>
 
 #include <cstdio>
@@ -398,6 +401,111 @@ int main(int argc, char **argv)
 			QDir().mkpath(outDir + QStringLiteral("/selftest32"));
 			writeFile(outDir + QStringLiteral("/selftest32/OLED_SelfTest.h"), s32);
 		}
+	}
+
+	/* ---------------- 多选读图 ImageGen::loadFrames ----------------
+	 *
+	 * 一次选一堆图拼动画，出错的都是些不显眼的地方：
+	 * 排序用字符串比会把 frame10 排到 frame2 前面（动画顺序乱），
+	 * 上限按文件算而不是按批次算（20 个 300 帧的 GIF 能撑爆内存），
+	 * 一个坏文件把整批都拖垮（用户看到"什么都没导入"）。
+	 * 这几条都在这里钉住。
+	 */
+	std::printf("[多选读图 loadFrames]\n");
+	{
+		const QString dir = outDir + QStringLiteral("/frames");
+		QDir().mkpath(dir);
+
+		auto makePng = [&dir](const QString &name, QRgb color) {
+			QImage img(8, 8, QImage::Format_ARGB32);
+			img.fill(color);
+			return img.save(dir + QStringLiteral("/") + name, "PNG");
+		};
+		const bool made = makePng(QStringLiteral("frame1.png"),  qRgb(255, 0, 0))
+		               && makePng(QStringLiteral("frame2.png"),  qRgb(0, 255, 0))
+		               && makePng(QStringLiteral("frame10.png"), qRgb(0, 0, 255));
+		check("能造出 PNG 素材", made);
+
+		/* 故意按 10 → 2 → 1 的顺序传，模拟"用户点选顺序和文件名顺序不一致" */
+		const QStringList raw = {dir + QStringLiteral("/frame10.png"),
+		                         dir + QStringLiteral("/frame2.png"),
+		                         dir + QStringLiteral("/frame1.png")};
+
+		const ImageGen::FrameBatch b = ImageGen::loadFrames(raw);
+		check("三张图各读成一帧", b.frames.size() == 3,
+		      QStringLiteral("got %1").arg(b.frames.size()));
+
+		const bool orderOk = (b.frames.size() == 3)
+		                     && b.frames.at(0).pixelColor(0, 0).red()   == 255
+		                     && b.frames.at(1).pixelColor(0, 0).green() == 255
+		                     && b.frames.at(2).pixelColor(0, 0).blue()  == 255;
+		check("按文件名自然排序（1 → 2 → 10，不是 10 → 2 → 1）", orderOk);
+
+		check("files 也按播放顺序给回",
+		      b.files.size() == 3
+		          && QFileInfo(b.files.first()).fileName() == QStringLiteral("frame1.png")
+		          && QFileInfo(b.files.last()).fileName()  == QStringLiteral("frame10.png"));
+		check("totalFrames 是文件里真实总数", b.totalFrames == 3,
+		      QStringLiteral("got %1").arg(b.totalFrames));
+		check("静态图没给延时（由界面用默认值）", b.delayMs == 0);
+		check("好好的文件不算截断", !b.truncated);
+		check("没有失败文件", b.failed.isEmpty());
+
+		/* 上限按批次算：3 个文件一共只收 2 帧 */
+		const ImageGen::FrameBatch capped = ImageGen::loadFrames(raw, 2);
+		check("maxFrames 按批次算（3 个文件只收 2 帧）", capped.frames.size() == 2,
+		      QStringLiteral("got %1").arg(capped.frames.size()));
+		check("撞上限算截断", capped.truncated);
+		check("截断原因是帧数上限", capped.cappedByCount && !capped.cappedByMemory);
+		check("记下有几个文件整个没读", capped.skippedFiles == 1,
+		      QStringLiteral("got %1").arg(capped.skippedFiles));
+		check("批次帧数上限回填给界面", capped.limitFrames == 2,
+		      QStringLiteral("got %1").arg(capped.limitFrames));
+
+		/* 一个坏文件不该把整批拖垮 */
+		QStringList withBad = raw;
+		withBad << dir + QStringLiteral("/zz_nope.png");
+		const ImageGen::FrameBatch bad = ImageGen::loadFrames(withBad);
+		check("坏文件不拖累其它文件", bad.frames.size() == 3,
+		      QStringLiteral("got %1").arg(bad.frames.size()));
+		check("坏文件名进 failed",
+		      bad.failed.size() == 1
+		          && bad.failed.first() == QStringLiteral("zz_nope.png"),
+		      bad.failed.join(QStringLiteral(",")));
+
+		/* 全坏：界面要能判定"一张都没读进来" */
+		const ImageGen::FrameBatch none = ImageGen::loadFrames(
+		    QStringList() << dir + QStringLiteral("/nope_a.png")
+		                  << dir + QStringLiteral("/nope_b.png"));
+		check("全失败时 isEmpty", none.isEmpty());
+		check("全失败时都记在 failed", none.failed.size() == 2);
+
+		/* 预算不够时别硬塞：8×8 一帧 256 字节，给 100 字节预算 */
+		const ImageGen::FrameBatch poor = ImageGen::loadFrames(raw, 600, 100);
+		check("预算不足时一帧都不收", poor.isEmpty(),
+		      QStringLiteral("got %1").arg(poor.frames.size()));
+		check("预算不足的原因记成内存", poor.cappedByMemory && !poor.cappedByCount);
+
+		/* GIF：一个文件展开成多帧，并带回它自己的延时 */
+		const QString gif = QDir(QCoreApplication::applicationDirPath())
+		                        .absoluteFilePath(QStringLiteral("fixture/move.gif"));
+		QImageReader gr(gif);
+		const int gifCount = gr.imageCount();
+		check("找到 GIF 素材且多于 1 帧", gifCount > 1,
+		      QStringLiteral("%1 帧 / %2").arg(gifCount).arg(gif));
+
+		const ImageGen::FrameBatch gb = ImageGen::loadFrames(QStringList() << gif);
+		check("GIF 展开成它的全部帧", gb.frames.size() == gifCount,
+		      QStringLiteral("%1 vs %2").arg(gb.frames.size()).arg(gifCount));
+		check("GIF 带回自己的延时", gb.delayMs > 0,
+		      QStringLiteral("got %1").arg(gb.delayMs));
+
+		/* 一张图 + 一个 GIF：顺序仍按文件名，帧数累加 */
+		const ImageGen::FrameBatch mix = ImageGen::loadFrames(
+		    QStringList() << raw.at(0) << gif);
+		check("图片与 GIF 混选时帧数累加", mix.frames.size() == 1 + gifCount,
+		      QStringLiteral("%1 vs %2").arg(mix.frames.size()).arg(1 + gifCount));
+		check("混选时延时取 GIF 的", mix.delayMs == gb.delayMs);
 	}
 
 	std::printf("\n%d passed, %d failed\n", g_pass, g_fail);

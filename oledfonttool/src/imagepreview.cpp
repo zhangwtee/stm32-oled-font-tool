@@ -8,7 +8,9 @@
 ImagePreview::ImagePreview(QWidget *parent)
     : QWidget(parent)
 {
-    m_emptyText = QStringLiteral("选择一张图片或 GIF 后，这里显示实际会烧进 Flash 的点阵");
+    /* 不带"一张"：现在既能选单张也能一次多选，占位文字别把用户框住 */
+    m_emptyText = QStringLiteral("选择图片后，这里显示实际会烧进 Flash 的点阵");
+
     setMinimumSize(240, 160);
     setAutoFillBackground(false);
 }

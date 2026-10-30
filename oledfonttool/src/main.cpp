@@ -17,7 +17,6 @@
 #include <QFrame>
 #include <QGroupBox>
 #include <QHBoxLayout>
-#include <QImageReader>
 #include <QLabel>
 #include <QLineEdit>
 #include <QListWidget>
@@ -737,7 +736,9 @@ private:
 	mutable QStringList m_projectCandidates;
 
 	/* 图片 / 动画模式的状态 */
-	QString                      m_imgPath;
+	QString                      m_imgPath;       /* 单选时的文件路径 */
+	QStringList                  m_imgFiles;      /* 多选时按播放顺序排好的文件列表 */
+	QString                      m_imgSourceName; /* 写进头文件注释的"来源" */
 	QVector<QImage>              m_imgSource;   /* 从文件读出的原始帧 */
 	QVector<QImage>              m_imgMono;     /* 单色化后的帧（预览用） */
 	QVector<QVector<quint8>>     m_imgPacked;   /* 打包后的显存字节（导出用） */
@@ -751,6 +752,7 @@ private:
 	QSlider                     *m_imgThreshold;
 	QLabel                      *m_imgThresholdValue;
 	QCheckBox                   *m_imgDither;
+	QCheckBox                   *m_imgMulti;    /* 一次选多张图，拼成动画 */
 	QPushButton                 *m_imgPlayBtn;
 	QTimer                      *m_imgTimer;
 };
@@ -1212,6 +1214,33 @@ QWidget *MainWindow::buildImagePage()
 	QPushButton *openBtn = new QPushButton(QStringLiteral("选择图片或 GIF…"), boxFile);
 	fileLayout->addWidget(openBtn);
 
+	/* 帧序列除了用现成 GIF，还经常是一堆 PNG 摆在一个文件夹里导出来的。
+	 * 勾上就直接多选，按文件名自然排序拼成动画（frame2 排在 frame10 前面），
+	 * 不用先找人合成 GIF 再导回来。不勾则是老行为：一次一张。 */
+	m_imgMulti = new QCheckBox(QStringLiteral("多选：多张图片拼成动画"), boxFile);
+	m_imgMulti->setToolTip(QStringLiteral(
+		"勾上后可以在对话框里一次选多张图片，按文件名顺序依次作为帧。\n"
+		"每个文件如果本身是 GIF，它的所有帧会先展开再接下一条。\n"
+		"不勾则一次只导入一个文件（GIF 照样按多帧动画处理）。"));
+	fileLayout->addWidget(m_imgMulti);
+
+	/* 按钮文字跟着勾选状态变，一眼看出"这次能不能多选"。
+	 *
+	 * 状态刻意不存 QSettings：本机上 QSettings 写入一直没真正落盘
+	 * （HKCU\Software\OLEDFontTool\OLED 汉字取模工具 下始终是空键，
+	 *   project/root、export/lastDir 同样存不住），存了也会变成
+	 * "这次勾上、下次启动又变回不勾"。宁可默认不勾，让用户自己决定。
+	 * 顺带好处是不动老行为：不勾就完全和以前一样。 */
+	auto syncMultBtn = [openBtn](bool on) {
+		openBtn->setText(on ? QStringLiteral("选择图片（可多选）…")
+		                    : QStringLiteral("选择图片或 GIF…"));
+	};
+	connect(m_imgMulti, &QCheckBox::toggled, this, [this, syncMultBtn](bool on) {
+		syncMultBtn(on);
+		updateImageInfo();      /* 还没选图时那句"选一张…开始"跟着变 */
+	});
+	syncMultBtn(m_imgMulti->isChecked());
+
 	m_imgFileLabel = new QLabel(QStringLiteral("（还没选文件）"), boxFile);
 	m_imgFileLabel->setObjectName(QStringLiteral("PathLabel"));
 	m_imgFileLabel->setWordWrap(true);
@@ -1371,101 +1400,110 @@ void MainWindow::syncImageSizeToScreen()
 
 void MainWindow::loadImageFile()
 {
-	const QString path = QFileDialog::getOpenFileName(
-		this, QStringLiteral("选择图片或 GIF"),
-		m_imgPath.isEmpty() ? QString() : QFileInfo(m_imgPath).absolutePath(),
-		QStringLiteral("图片 (*.gif *.png *.jpg *.jpeg *.bmp);;所有文件 (*.*)"));
-	if (path.isEmpty())
+	/* 起始目录：没导入过就传空，让系统用它记住的上次目录 ——
+	 * 原来就是这么做的，别自作主张换成 home。 */
+	const QString startDir = m_imgPath.isEmpty() ? QString()
+	                                             : QFileInfo(m_imgPath).absolutePath();
+	const QString filter = QStringLiteral("图片 (*.gif *.png *.jpg *.jpeg *.bmp);;所有文件 (*.*)");
+
+	const bool multi = (m_imgMulti && m_imgMulti->isChecked());
+
+	QStringList paths;
+	if (multi)
 	{
-		return;
-	}
-
-	QImageReader reader(path);
-	reader.setDecideFormatFromContent(true);
-
-	/* GIF 会有多帧；静态图片只有 1 帧。
-	 * 帧数上限设 600 —— 再多既没意义也吃内存。
-	 *
-	 * 但 600 帧本身也够呛：每一帧都按原分辨率留在 m_imgSource 里，
-	 * 一帧 QImage 占 宽×高×4 字节，1920×1080 的 GIF 600 帧就是 5GB，
-	 * 直接把机器拖死（还没算后面逐帧转换的临时内存）。
-	 * 所以再按 400MB 预算反推能留几帧，超了只读前面一段，
-	 * 并在文件名下面写清楚"只读了前 N 帧"，不假装全读进来了。 */
-	const qint64 kMemBudget = 400LL * 1024 * 1024;
-
-	QVector<QImage> frames;
-	int firstDelay = 0;
-	int totalFrames = 0;        /* 文件里实际有多少帧 */
-	bool cappedByMemory = false;
-
-	const int count = reader.imageCount();
-	if (count > 1)
-	{
-		totalFrames = count;
-		int limit = qMin(count, 600);
-
-		const QSize raw = reader.size();
-		const qint64 perFrame = qint64(raw.width()) * qint64(raw.height()) * 4;
-		if (perFrame > 0)
-		{
-			const qint64 fit = kMemBudget / perFrame;
-			if (fit < limit)
-			{
-				limit = int(qMax<qint64>(1, fit));
-				cappedByMemory = true;
-			}
-		}
-
-		for (int i = 0; i < limit; ++i)
-		{
-			const QImage img = reader.read();
-			if (img.isNull())
-			{
-				break;
-			}
-			if (firstDelay <= 0)
-			{
-				const int d = reader.nextImageDelay();
-				if (d > 0)
-				{
-					firstDelay = d;
-				}
-			}
-			frames.append(img);
-		}
+		paths = QFileDialog::getOpenFileNames(
+			this, QStringLiteral("选择图片（可多选，按文件名顺序播放）"), startDir, filter);
 	}
 	else
 	{
-		const QImage img = reader.read();
-		if (!img.isNull())
+		const QString one = QFileDialog::getOpenFileName(
+			this, QStringLiteral("选择图片或 GIF"), startDir, filter);
+		if (!one.isEmpty())
 		{
-			frames.append(img);
-			totalFrames = 1;
+			paths << one;
 		}
 	}
-
-	if (frames.isEmpty())
+	if (paths.isEmpty())
 	{
-		QMessageBox::warning(this, QStringLiteral("打不开"),
-		                     QStringLiteral("这个文件读不出图像：\n%1\n\n%2")
-		                     .arg(path, reader.errorString()));
 		return;
 	}
 
-	m_imgPath   = path;
-	m_imgSource = frames;
-	m_imgDelayMs = (firstDelay > 0) ? firstDelay : 100;
+	/* 排序、GIF 展开、跨文件的帧数/内存上限都在 ImageGen::loadFrames 里，
+	 * 这里只负责弹对话框和把结果摆到界面上。 */
+	const ImageGen::FrameBatch batch = ImageGen::loadFrames(paths);
 
-	QString fileInfo = QStringLiteral("%1\n（%2 帧，原尺寸 %3×%4）")
-	                       .arg(QFileInfo(path).fileName())
-	                       .arg(frames.size())
-	                       .arg(frames.first().width())
-	                       .arg(frames.first().height());
-	if (cappedByMemory)
+	if (batch.isEmpty())
 	{
-		fileInfo += QStringLiteral("\n⚠ 文件共 %1 帧，超出内存预算，只读了前 %2 帧")
-		                .arg(totalFrames)
-		                .arg(frames.size());
+		QMessageBox::warning(this, QStringLiteral("打不开"),
+		                     QStringLiteral("选中的文件都读不出图像：\n%1\n\n"
+		                                    "支持 GIF / PNG / JPG / BMP。")
+		                     .arg(batch.failed.join(QStringLiteral("\n"))));
+		return;
+	}
+
+	const QStringList &used = batch.files;
+	const QImage &first = batch.frames.first();
+
+	m_imgFiles      = used;
+	m_imgPath       = used.first();      /* 导出默认目录按它算 */
+	m_imgSource     = batch.frames;
+	m_imgDelayMs    = (batch.delayMs > 0) ? batch.delayMs : 100;
+	m_imgSourceName = (used.size() == 1)
+	                      ? QFileInfo(used.first()).fileName()
+	                      : QStringLiteral("%1 等 %2 个文件（多选合并）")
+	                            .arg(QFileInfo(used.first()).fileName())
+	                            .arg(used.size());
+
+	QString fileInfo;
+	if (used.size() == 1)
+	{
+		fileInfo = QStringLiteral("%1\n（%2 帧，原尺寸 %3×%4）")
+		               .arg(QFileInfo(used.first()).fileName())
+		               .arg(batch.frames.size())
+		               .arg(first.width())
+		               .arg(first.height());
+	}
+	else
+	{
+		/* 多文件时尺寸可能各不相同，报第一张就行，别编一个"平均尺寸" */
+		fileInfo = QStringLiteral("%1 等 %2 个文件\n（按文件名顺序 → 共 %3 帧，首帧 %4×%5）")
+		               .arg(QFileInfo(used.first()).fileName())
+		               .arg(used.size())
+		               .arg(batch.frames.size())
+		               .arg(first.width())
+		               .arg(first.height());
+	}
+	if (batch.truncated)
+	{
+		/* 说清楚"为什么只读了这么多"。
+		 * 原来只写"共 N 帧，只读了前 M 帧"，撞帧数上限时 N 也只统计到中断处，
+		 * 会出现"共 2 帧，只读了前 2 帧"这种自己打自己的话。 */
+		QStringList why;
+		if (batch.cappedByCount)
+		{
+			why << QStringLiteral("达到 %1 帧上限").arg(batch.limitFrames);
+		}
+		if (batch.cappedByMemory)
+		{
+			why << QStringLiteral("内存预算不够");
+		}
+		if (why.isEmpty())
+		{
+			why << QStringLiteral("超出可用上限");
+		}
+		fileInfo += QStringLiteral("\n⚠ 只收了前 %1 帧：%2")
+		                .arg(batch.frames.size())
+		                .arg(why.join(QStringLiteral("，")));
+		if (batch.skippedFiles > 0)
+		{
+			fileInfo += QStringLiteral("（另有 %1 个文件没读）").arg(batch.skippedFiles);
+		}
+	}
+	if (!batch.failed.isEmpty())
+	{
+		fileInfo += QStringLiteral("\n⚠ 有 %1 个文件读不出图像：%2")
+		                .arg(batch.failed.size())
+		                .arg(batch.failed.join(QStringLiteral("、")));
 	}
 	m_imgFileLabel->setText(fileInfo);
 
@@ -1515,7 +1553,9 @@ void MainWindow::updateImageInfo()
 	if (m_imgPacked.isEmpty())
 	{
 		const qint64 cap = flashCapacity();
-		QString tip = QStringLiteral("选一张图片或 GIF 开始。");
+		QString tip = (m_imgMulti && m_imgMulti->isChecked())
+		                  ? QStringLiteral("选一张或多张图片开始。")
+		                  : QStringLiteral("选一张图片或 GIF 开始。");
 		if (cap > 0)
 		{
 			/* 按实际容量和当前选的尺寸举例：512KB 的芯片能放 512 帧，
@@ -1635,8 +1675,10 @@ void MainWindow::exportAnimHeader()
 	}
 
 	const ImageGen::Options opt = imageOptions();
-	const QString content = ImageGen::renderHeader(m_imgPacked, opt, effectiveDelayMs(),
-	                                               QFileInfo(m_imgPath).fileName());
+	/* 来源写 m_imgSourceName：多选合并时它写的是"a.png 等 8 个文件"，
+	 * 单看第一个文件名会以为动画只有一张图。 */
+	const QString src = m_imgSourceName.isEmpty() ? QStringLiteral("未记录") : m_imgSourceName;
+	const QString content = ImageGen::renderHeader(m_imgPacked, opt, effectiveDelayMs(), src);
 
 	QFile file(path);
 	if (!file.open(QIODevice::WriteOnly | QIODevice::Text))

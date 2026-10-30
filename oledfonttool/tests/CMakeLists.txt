@@ -61,3 +61,9 @@ add_custom_command(TARGET test_chip POST_BUILD
     COMMAND ${CMAKE_COMMAND} -E copy_directory
             ${CMAKE_CURRENT_SOURCE_DIR}/fixture
             $<TARGET_FILE_DIR:test_chip>/fixture)
+
+# 多选读图的测试要用到 fixture/move.gif（多帧 GIF）
+add_custom_command(TARGET test_emit POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -E copy_directory
+            ${CMAKE_CURRENT_SOURCE_DIR}/fixture
+            $<TARGET_FILE_DIR:test_emit>/fixture)

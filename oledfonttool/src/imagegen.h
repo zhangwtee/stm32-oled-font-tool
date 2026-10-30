@@ -2,8 +2,9 @@
 #define IMAGEGEN_H
 
 #include <QImage>
-#include <QVector>
 #include <QString>
+#include <QStringList>
+#include <QVector>
 #include <QtGlobal>
 
 /*
@@ -68,6 +69,40 @@ public:
                                 const Options &opt,
                                 int delayMs,
                                 const QString &sourceName);
+
+    /*
+     * 一批图片文件的读取结果。
+     *
+     * 单张图和"一次多选一堆图"走的是同一条路：前者就是一个元素的列表。
+     * 失败的原因要能说清楚，所以 failed 带文件名而不是只给个 bool。
+     */
+    struct FrameBatch
+    {
+        QVector<QImage> frames;        /* 读到的帧，已按播放顺序排好 */
+        QStringList     files;         /* 实际参与的文件，已按播放顺序排好 */
+        int             delayMs = 0;   /* 0 = 没有任何文件提供延时（静态图） */
+        int             totalFrames = 0; /* 这些文件里本来一共有多少帧 */
+        int             limitFrames = 0; /* 本批次用的帧数上限 */
+        int             skippedFiles = 0; /* 因为撞上限、整个没被读的文件数 */
+        bool            truncated = false;      /* 有文件被截掉了 */
+        bool            cappedByCount = false;  /* 原因之一是撞帧数上限 */
+        bool            cappedByMemory = false; /* 原因之一是内存预算不够 */
+        QStringList     failed;        /* 读不出图像的文件名 */
+
+        bool isEmpty() const { return frames.isEmpty(); }
+    };
+
+    /*
+     * 按文件名顺序读一批图片，GIF 展开它的所有帧再接下一个文件。
+     *
+     * maxFrames 和 budgetBytes 是**整个批次**共用的上限：
+     * 多选 20 个 300 帧的 GIF 应该是 600 帧封顶，而不是每个文件各 600 帧。
+     * 预算按 宽×高×4 估算每帧占用，超了就只读前面一段并置 truncated，
+     * 而不是让程序吃到几个 G 内存再被系统杀掉。
+     */
+    static FrameBatch loadFrames(const QStringList &paths,
+                                 int maxFrames = 600,
+                                 qint64 budgetBytes = 400LL * 1024 * 1024);
 };
 
 #endif // IMAGEGEN_H
