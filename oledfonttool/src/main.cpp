@@ -1,6 +1,7 @@
 #include <QApplication>
 #include <QByteArray>
 #include <QCheckBox>
+#include <QCollator>
 #include <QComboBox>
 #include <QCoreApplication>
 #include <QDateTime>
@@ -43,6 +44,8 @@
 #include <QTextStream>
 #include <QTimer>
 #include <QVBoxLayout>
+
+#include <algorithm>
 
 #include "fontgen.h"
 #include "fontpreview.h"
@@ -637,6 +640,29 @@ static const char *kQss =
 	"QMessageBox { background: #FFFFFF; }"
 	"QMessageBox QLabel { color: #1F2328; min-width: 320px; }";
 
+/* 一份素材 = 一张图或一个 GIF。
+ *
+ * 之所以要这个结构：工程里常常同时要开机图、logo、几个小图标，
+ * 它们尺寸不同、阈值不同、导出成不同的头文件。原先图片页只有一个槽位，
+ * 导完一张换下一张，前一张的参数就丢了，来回改很折磨人。
+ *
+ * mono / packed 是当前参数下的计算结果，缓存在这里而不是每次重算：
+ * 从列表切回来时不用再跑一遍缩放和抖动。
+ */
+struct ImageAsset
+{
+	QString                    name;        /* 列表名，也是导出文件名和标识前缀 */
+	QStringList                files;       /* 参与的文件（GIF 就一个） */
+	QString                    sourceName;  /* 写进头文件「来源」那行 */
+	QVector<QImage>            source;      /* 原始帧 */
+	QVector<QImage>            mono;        /* 单色化后（预览用） */
+	QVector<QVector<quint8>>   packed;      /* 显存字节（导出用） */
+	int                        delayMs = 100;
+	ImageGen::Options          opt;         /* 每份素材自己的取模设置 */
+	int                        step = 1;    /* 抽帧步长 */
+	QString                    note;        /* 导入时的提醒：截断 / 读不出 */
+};
+
 class MainWindow : public QMainWindow
 {
 public:
@@ -661,9 +687,10 @@ private:
 
 	/* ---- 图片 / 动画模式 ---- */
 	QWidget *buildImagePage();
-	void loadImageFile();
+	void loadImageFile();           /* 添加素材：单个文件一份，或多个文件按模式处理 */
 	void recomputeImage();          /* 重新缩放+单色+打包，并刷新预览 */
-	void exportAnimHeader();
+	void exportAnimHeader();        /* 导出当前素材 */
+	void exportAllAssets();         /* 每份素材各导一个 .h */
 	void togglePlayback();
 	void updateImageInfo();
 	ImageGen::Options imageOptions() const;
@@ -673,6 +700,17 @@ private:
 	int effectiveDelayMs() const;
 	/* 「屏」下拉选 32 行时，把图片页的目标尺寸跟到 128×32 */
 	void syncImageSizeToScreen();
+
+	/* ---- 素材列表 ---- */
+	ImageAsset       *currentAsset();
+	const ImageAsset *currentAsset() const;
+	void addAssets(const QStringList &paths);   /* 读文件 → 追加一份或合成一份 */
+	void selectAsset(int row);                  /* 切换选中，控件跟着换 */
+	void removeCurrentAsset();
+	void refreshAssetList();                    /* 重建列表项文字 */
+	void refreshAssetItem(int row);
+	void showAsset(int row);                    /* 把某份素材摆到预览和参数区 */
+	void storeWidgetsToAsset(int row);          /* 控件当前值写回素材 */
 
 	/* ---- 烧录自检帧 ---- */
 	void showSelfTest();
@@ -735,15 +773,12 @@ private:
 	 * 给界面提示用（只发现一个的话不必多说）。所以是 mutable。 */
 	mutable QStringList m_projectCandidates;
 
-	/* 图片 / 动画模式的状态 */
-	QString                      m_imgPath;       /* 单选时的文件路径 */
-	QStringList                  m_imgFiles;      /* 多选时按播放顺序排好的文件列表 */
-	QString                      m_imgSourceName; /* 写进头文件注释的"来源" */
-	QVector<QImage>              m_imgSource;   /* 从文件读出的原始帧 */
-	QVector<QImage>              m_imgMono;     /* 单色化后的帧（预览用） */
-	QVector<QVector<quint8>>     m_imgPacked;   /* 打包后的显存字节（导出用） */
-	int                          m_imgDelayMs = 100;   /* 帧延时，来自 GIF */
+	/* 图片 / 动画模式的状态：每份素材各存一份参数，互不影响 */
+	QVector<ImageAsset>          m_assets;
+	int                          m_imgCurrent = -1;   /* 列表里选中的那一份 */
+	QString                      m_imgPath;           /* 最近导入的路径，决定对话框起始目录 */
 	ImagePreview                *m_imgPreview;
+	QListWidget                 *m_imgList;
 	QLabel                      *m_imgFileLabel;
 	QLabel                      *m_imgInfo;
 	QComboBox                   *m_imgSize;
@@ -752,7 +787,7 @@ private:
 	QSlider                     *m_imgThreshold;
 	QLabel                      *m_imgThresholdValue;
 	QCheckBox                   *m_imgDither;
-	QCheckBox                   *m_imgMulti;    /* 一次选多张图，拼成动画 */
+	QCheckBox                   *m_imgMerge;    /* 多选时合成一个动画（不勾＝各存一份） */
 	QPushButton                 *m_imgPlayBtn;
 	QTimer                      *m_imgTimer;
 };
@@ -1211,37 +1246,41 @@ QWidget *MainWindow::buildImagePage()
 	QGroupBox *boxFile = new QGroupBox(QStringLiteral("素材"), side);
 	QVBoxLayout *fileLayout = new QVBoxLayout(boxFile);
 
-	QPushButton *openBtn = new QPushButton(QStringLiteral("选择图片或 GIF…"), boxFile);
+	QPushButton *openBtn = new QPushButton(QStringLiteral("添加图片 / 动图…"), boxFile);
 	fileLayout->addWidget(openBtn);
 
-	/* 帧序列除了用现成 GIF，还经常是一堆 PNG 摆在一个文件夹里导出来的。
-	 * 勾上就直接多选，按文件名自然排序拼成动画（frame2 排在 frame10 前面），
-	 * 不用先找人合成 GIF 再导回来。不勾则是老行为：一次一张。 */
-	m_imgMulti = new QCheckBox(QStringLiteral("多选：多张图片拼成动画"), boxFile);
-	m_imgMulti->setToolTip(QStringLiteral(
-		"勾上后可以在对话框里一次选多张图片，按文件名顺序依次作为帧。\n"
-		"每个文件如果本身是 GIF，它的所有帧会先展开再接下一条。\n"
-		"不勾则一次只导入一个文件（GIF 照样按多帧动画处理）。"));
-	fileLayout->addWidget(m_imgMulti);
+	/* 一次选多个文件时怎么处理，交给用户决定：
+	 *   勾上  → 当成一个动画的连续帧（原有用法：一堆 PNG 合成动画）
+	 *   不勾  → 每个文件单独占一条，各导各的头文件（工程里放 logo、图标）
+	 * 默认不勾 —— 图片页本来就该能同时存好几份素材，
+	 * 想合动画的是少数场景，勾一下很快。 */
+	m_imgMerge = new QCheckBox(QStringLiteral("多选时合成一个动画"), boxFile);
+	m_imgMerge->setToolTip(QStringLiteral(
+		"勾上：一次选中的多张图片按文件名顺序拼成一段动画（frame2 排在 frame10 前）。\n"
+		"不勾：每个文件各自成为一条素材，分别预览、分别设置、分别导出，互不影响。\n"
+		"GIF 无论勾不勾都按它自己的多帧处理。"));
+	fileLayout->addWidget(m_imgMerge);
 
-	/* 按钮文字跟着勾选状态变，一眼看出"这次能不能多选"。
-	 *
-	 * 状态刻意不存 QSettings：本机上 QSettings 写入一直没真正落盘
-	 * （HKCU\Software\OLEDFontTool\OLED 汉字取模工具 下始终是空键，
-	 *   project/root、export/lastDir 同样存不住），存了也会变成
-	 * "这次勾上、下次启动又变回不勾"。宁可默认不勾，让用户自己决定。
-	 * 顺带好处是不动老行为：不勾就完全和以前一样。 */
-	auto syncMultBtn = [openBtn](bool on) {
-		openBtn->setText(on ? QStringLiteral("选择图片（可多选）…")
-		                    : QStringLiteral("选择图片或 GIF…"));
-	};
-	connect(m_imgMulti, &QCheckBox::toggled, this, [this, syncMultBtn](bool on) {
-		syncMultBtn(on);
-		updateImageInfo();      /* 还没选图时那句"选一张…开始"跟着变 */
-	});
-	syncMultBtn(m_imgMulti->isChecked());
+	/* 素材列表：改参数、导出都只作用于选中的那条 */
+	m_imgList = new QListWidget(boxFile);
+	m_imgList->setObjectName(QStringLiteral("AssetList"));
+	m_imgList->setMinimumHeight(84);
+	m_imgList->setMaximumHeight(132);
+	m_imgList->setAlternatingRowColors(false);
+	m_imgList->setSelectionMode(QAbstractItemView::SingleSelection);
+	fileLayout->addWidget(m_imgList);
 
-	m_imgFileLabel = new QLabel(QStringLiteral("（还没选文件）"), boxFile);
+	QHBoxLayout *listBtnRow = new QHBoxLayout();
+	QPushButton *removeBtn = new QPushButton(QStringLiteral("移除"), boxFile);
+	QPushButton *clearBtn  = new QPushButton(QStringLiteral("清空"), boxFile);
+	removeBtn->setToolTip(QStringLiteral("删掉列表里选中的这一份"));
+	clearBtn->setToolTip(QStringLiteral("删掉全部素材"));
+	listBtnRow->addWidget(removeBtn);
+	listBtnRow->addWidget(clearBtn);
+	listBtnRow->addStretch(1);
+	fileLayout->addLayout(listBtnRow);
+
+	m_imgFileLabel = new QLabel(QStringLiteral("（还没有素材）"), boxFile);
 	m_imgFileLabel->setObjectName(QStringLiteral("PathLabel"));
 	m_imgFileLabel->setWordWrap(true);
 	fileLayout->addWidget(m_imgFileLabel);
@@ -1299,11 +1338,18 @@ QWidget *MainWindow::buildImagePage()
 
 	QHBoxLayout *btnRow = new QHBoxLayout();
 	m_imgPlayBtn = new QPushButton(QStringLiteral("播放"), side);
-	QPushButton *exportBtn = new QPushButton(QStringLiteral("导出 anim.h"), side);
+	QPushButton *exportBtn = new QPushButton(QStringLiteral("导出这份 .h"), side);
 	exportBtn->setObjectName(QStringLiteral("Primary"));
+	exportBtn->setToolTip(QStringLiteral("只导出列表里选中的这一份素材"));
 	btnRow->addWidget(m_imgPlayBtn);
 	btnRow->addWidget(exportBtn);
 	sideLayout->addLayout(btnRow);
+
+	QPushButton *exportAllBtn = new QPushButton(QStringLiteral("全部导出…（每份一个 .h）"), side);
+	exportAllBtn->setToolTip(QStringLiteral(
+		"选一个目录，列表里每份素材各写一个 <名字>.h。\n"
+		"文件名和里面的宏、数组名都按素材名区分，可以同时 include 进一个工程。"));
+	sideLayout->addWidget(exportAllBtn);
 
 	/* 右侧预览 */
 	m_imgPreview = new ImagePreview(this);
@@ -1326,17 +1372,51 @@ QWidget *MainWindow::buildImagePage()
 
 	connect(openBtn, &QPushButton::clicked, this, &MainWindow::loadImageFile);
 	connect(exportBtn, &QPushButton::clicked, this, &MainWindow::exportAnimHeader);
+	connect(exportAllBtn, &QPushButton::clicked, this, &MainWindow::exportAllAssets);
 	connect(m_imgPlayBtn, &QPushButton::clicked, this, &MainWindow::togglePlayback);
-	connect(m_imgSize, QOverload<int>::of(&QComboBox::currentIndexChanged),
-	        this, [this](int) { recomputeImage(); });
-	connect(m_imgScale, QOverload<int>::of(&QComboBox::currentIndexChanged),
-	        this, [this](int) { recomputeImage(); });
-	connect(m_imgStep, QOverload<int>::of(&QComboBox::currentIndexChanged),
-	        this, [this](int) { recomputeImage(); });
-	connect(m_imgDither, &QCheckBox::toggled, this, [this](bool) { recomputeImage(); });
-	connect(m_imgThreshold, &QSlider::valueChanged, this, [this](int v) {
-		m_imgThresholdValue->setText(QString::number(v));
+	connect(removeBtn, &QPushButton::clicked, this, &MainWindow::removeCurrentAsset);
+	connect(clearBtn, &QPushButton::clicked, this, [this] {
+		if (m_assets.isEmpty())
+		{
+			return;
+		}
+		const auto ret = QMessageBox::question(
+			this, QStringLiteral("清空素材"),
+			QStringLiteral("把 %1 份素材全部删掉？文件本身不会动。").arg(m_assets.size()),
+			QMessageBox::Yes | QMessageBox::No, QMessageBox::No);
+		if (ret != QMessageBox::Yes)
+		{
+			return;
+		}
+		m_assets.clear();
+		m_imgCurrent = -1;
+		m_imgList->clear();
+		m_imgPreview->clearFrames();
+		m_imgFileLabel->setText(QStringLiteral("（还没有素材）"));
+		updateImageInfo();
+	});
+
+	/* 切换素材时先把当前控件值写回上一份（否则改完参数点走一下就丢了），
+	 * 再按新选中那份的参数重摆控件。 */
+	connect(m_imgList, &QListWidget::currentRowChanged, this, [this](int row) {
+		selectAsset(row);
+	});
+
+	/* 参数一改就落到当前素材上，然后只重算这一份 */
+	auto onParamChanged = [this] {
+		storeWidgetsToAsset(m_imgCurrent);
 		recomputeImage();
+	};
+	connect(m_imgSize, QOverload<int>::of(&QComboBox::currentIndexChanged),
+	        this, [onParamChanged](int) { onParamChanged(); });
+	connect(m_imgScale, QOverload<int>::of(&QComboBox::currentIndexChanged),
+	        this, [onParamChanged](int) { onParamChanged(); });
+	connect(m_imgStep, QOverload<int>::of(&QComboBox::currentIndexChanged),
+	        this, [onParamChanged](int) { onParamChanged(); });
+	connect(m_imgDither, &QCheckBox::toggled, this, [onParamChanged](bool) { onParamChanged(); });
+	connect(m_imgThreshold, &QSlider::valueChanged, this, [this, onParamChanged](int v) {
+		m_imgThresholdValue->setText(QString::number(v));
+		onParamChanged();
 	});
 
 	/* 初始尺寸跟着「屏」下拉走（0.91" 屏时默认就是 128×32） */
@@ -1370,7 +1450,9 @@ int MainWindow::frameStep() const
  * 而用户看到的是"导出以后动画快得离谱"，很难联想到是抽帧这一步。 */
 int MainWindow::effectiveDelayMs() const
 {
-	return qMax(1, m_imgDelayMs) * frameStep();
+	const ImageAsset *a = currentAsset();
+	const int base = (a && a->delayMs > 0) ? a->delayMs : 100;
+	return qMax(1, base) * frameStep();
 }
 
 /* 「屏」下拉在文字页，图片页的目标尺寸在另一页，两边本来就该一致。
@@ -1398,86 +1480,47 @@ void MainWindow::syncImageSizeToScreen()
 	}
 }
 
-void MainWindow::loadImageFile()
+/* 一份素材的说明文字：文件名、帧数、原尺寸，加上导入时的提醒。
+ * 列表里只放名字和关键数字，详细内容摆在这里。 */
+static QString assetDetailText(const ImageAsset &a)
 {
-	/* 起始目录：没导入过就传空，让系统用它记住的上次目录 ——
-	 * 原来就是这么做的，别自作主张换成 home。 */
-	const QString startDir = m_imgPath.isEmpty() ? QString()
-	                                             : QFileInfo(m_imgPath).absolutePath();
-	const QString filter = QStringLiteral("图片 (*.gif *.png *.jpg *.jpeg *.bmp);;所有文件 (*.*)");
-
-	const bool multi = (m_imgMulti && m_imgMulti->isChecked());
-
-	QStringList paths;
-	if (multi)
+	QString s;
+	if (a.files.isEmpty())
 	{
-		paths = QFileDialog::getOpenFileNames(
-			this, QStringLiteral("选择图片（可多选，按文件名顺序播放）"), startDir, filter);
+		s = a.name;
 	}
-	else
+	else if (a.files.size() == 1)
 	{
-		const QString one = QFileDialog::getOpenFileName(
-			this, QStringLiteral("选择图片或 GIF"), startDir, filter);
-		if (!one.isEmpty())
-		{
-			paths << one;
-		}
-	}
-	if (paths.isEmpty())
-	{
-		return;
-	}
-
-	/* 排序、GIF 展开、跨文件的帧数/内存上限都在 ImageGen::loadFrames 里，
-	 * 这里只负责弹对话框和把结果摆到界面上。 */
-	const ImageGen::FrameBatch batch = ImageGen::loadFrames(paths);
-
-	if (batch.isEmpty())
-	{
-		QMessageBox::warning(this, QStringLiteral("打不开"),
-		                     QStringLiteral("选中的文件都读不出图像：\n%1\n\n"
-		                                    "支持 GIF / PNG / JPG / BMP。")
-		                     .arg(batch.failed.join(QStringLiteral("\n"))));
-		return;
-	}
-
-	const QStringList &used = batch.files;
-	const QImage &first = batch.frames.first();
-
-	m_imgFiles      = used;
-	m_imgPath       = used.first();      /* 导出默认目录按它算 */
-	m_imgSource     = batch.frames;
-	m_imgDelayMs    = (batch.delayMs > 0) ? batch.delayMs : 100;
-	m_imgSourceName = (used.size() == 1)
-	                      ? QFileInfo(used.first()).fileName()
-	                      : QStringLiteral("%1 等 %2 个文件（多选合并）")
-	                            .arg(QFileInfo(used.first()).fileName())
-	                            .arg(used.size());
-
-	QString fileInfo;
-	if (used.size() == 1)
-	{
-		fileInfo = QStringLiteral("%1\n（%2 帧，原尺寸 %3×%4）")
-		               .arg(QFileInfo(used.first()).fileName())
-		               .arg(batch.frames.size())
-		               .arg(first.width())
-		               .arg(first.height());
+		s = QStringLiteral("%1\n（%2 帧，原尺寸 %3×%4）")
+		        .arg(QFileInfo(a.files.first()).fileName())
+		        .arg(a.source.size())
+		        .arg(a.source.isEmpty() ? 0 : a.source.first().width())
+		        .arg(a.source.isEmpty() ? 0 : a.source.first().height());
 	}
 	else
 	{
 		/* 多文件时尺寸可能各不相同，报第一张就行，别编一个"平均尺寸" */
-		fileInfo = QStringLiteral("%1 等 %2 个文件\n（按文件名顺序 → 共 %3 帧，首帧 %4×%5）")
-		               .arg(QFileInfo(used.first()).fileName())
-		               .arg(used.size())
-		               .arg(batch.frames.size())
-		               .arg(first.width())
-		               .arg(first.height());
+		s = QStringLiteral("%1 等 %2 个文件\n（按文件名顺序 → 共 %3 帧，首帧 %4×%5）")
+		        .arg(QFileInfo(a.files.first()).fileName())
+		        .arg(a.files.size())
+		        .arg(a.source.size())
+		        .arg(a.source.isEmpty() ? 0 : a.source.first().width())
+		        .arg(a.source.isEmpty() ? 0 : a.source.first().height());
 	}
+	if (!a.note.isEmpty())
+	{
+		s += QLatin1Char('\n') + a.note;
+	}
+	return s;
+}
+
+/* 导入时被截断或读不出文件，要说清楚为什么。
+ * 只说"只读了前 N 帧"而不说原因，用户会以为文件本身就这么几帧。 */
+static QString batchNote(const ImageGen::FrameBatch &batch)
+{
+	QString note;
 	if (batch.truncated)
 	{
-		/* 说清楚"为什么只读了这么多"。
-		 * 原来只写"共 N 帧，只读了前 M 帧"，撞帧数上限时 N 也只统计到中断处，
-		 * 会出现"共 2 帧，只读了前 2 帧"这种自己打自己的话。 */
 		QStringList why;
 		if (batch.cappedByCount)
 		{
@@ -1491,23 +1534,350 @@ void MainWindow::loadImageFile()
 		{
 			why << QStringLiteral("超出可用上限");
 		}
-		fileInfo += QStringLiteral("\n⚠ 只收了前 %1 帧：%2")
-		                .arg(batch.frames.size())
-		                .arg(why.join(QStringLiteral("，")));
+		note = QStringLiteral("⚠ 只收了前 %1 帧：%2")
+		           .arg(batch.frames.size())
+		           .arg(why.join(QStringLiteral("，")));
 		if (batch.skippedFiles > 0)
 		{
-			fileInfo += QStringLiteral("（另有 %1 个文件没读）").arg(batch.skippedFiles);
+			note += QStringLiteral("（另有 %1 个文件没读）").arg(batch.skippedFiles);
 		}
 	}
 	if (!batch.failed.isEmpty())
 	{
-		fileInfo += QStringLiteral("\n⚠ 有 %1 个文件读不出图像：%2")
-		                .arg(batch.failed.size())
-		                .arg(batch.failed.join(QStringLiteral("、")));
+		if (!note.isEmpty())
+		{
+			note += QLatin1Char('\n');
+		}
+		note += QStringLiteral("⚠ 有 %1 个文件读不出图像：%2")
+		            .arg(batch.failed.size())
+		            .arg(batch.failed.join(QStringLiteral("、")));
 	}
-	m_imgFileLabel->setText(fileInfo);
+	return note;
+}
 
-	recomputeImage();
+/* 按素材自己的参数重算预览帧和导出字节 */
+static void rebuildAsset(ImageAsset &a)
+{
+	a.mono.clear();
+	a.packed.clear();
+
+	const int step = qMax(1, a.step);
+	for (int i = 0; i < a.source.size(); i += step)
+	{
+		const QVector<quint8> bytes = ImageGen::convert(a.source.at(i), a.opt);
+		a.packed.append(bytes);
+		/* 预览用"从显存字节还原出来的图"，保证看到的就是要烧进去的数据 */
+		a.mono.append(ImageGen::unpackFromDisplay(bytes, a.opt.width, a.opt.height));
+	}
+}
+
+ImageAsset *MainWindow::currentAsset()
+{
+	if (m_imgCurrent < 0 || m_imgCurrent >= m_assets.size())
+	{
+		return nullptr;
+	}
+	return &m_assets[m_imgCurrent];
+}
+
+const ImageAsset *MainWindow::currentAsset() const
+{
+	if (m_imgCurrent < 0 || m_imgCurrent >= m_assets.size())
+	{
+		return nullptr;
+	}
+	return &m_assets.at(m_imgCurrent);
+}
+
+void MainWindow::loadImageFile()
+{
+	/* 起始目录：没导入过就传空，让系统用它记住的上次目录。
+	 * 一次永远允许多选 —— 选几个由用户定，怎么处理由「合成一个动画」决定。 */
+	const QString startDir = m_imgPath.isEmpty() ? QString()
+	                                             : QFileInfo(m_imgPath).absolutePath();
+	const QString filter = QStringLiteral("图片 (*.gif *.png *.jpg *.jpeg *.bmp);;所有文件 (*.*)");
+
+	const QStringList paths = QFileDialog::getOpenFileNames(
+		this, QStringLiteral("选择图片或动图（可多选）"), startDir, filter);
+	if (paths.isEmpty())
+	{
+		return;
+	}
+	addAssets(paths);
+}
+
+void MainWindow::addAssets(const QStringList &paths)
+{
+	if (paths.isEmpty())
+	{
+		return;
+	}
+
+	/* 先把当前控件值写回选中的那份，避免待会儿切到新素材时把改动丢了 */
+	storeWidgetsToAsset(m_imgCurrent);
+
+	const bool merge = (m_imgMerge && m_imgMerge->isChecked());
+	const int  firstRow = m_assets.size();
+
+	/* 新素材的名字取文件名（去扩展名），转成能当 C 标识符的样子，重名加 _2。
+	 * 这个名字三处共用：列表显示、导出文件名、头文件里的宏/函数前缀 ——
+	 * 只维护一套名字，用户不用记两套对应关系。 */
+	QStringList used;
+	used.reserve(m_assets.size() + paths.size());
+	for (const ImageAsset &a : m_assets)
+	{
+		used << a.name;
+	}
+
+	/* 新素材沿用当前这一份的取模设置：一次导十个图标通常想要同一档尺寸和阈值，
+	 * 每张都从头调一遍太烦。 */
+	const ImageGen::Options seedOpt  = imageOptions();
+	const int               seedStep = frameStep();
+
+	auto addOne = [&](const ImageGen::FrameBatch &batch, const QString &proposed) {
+		ImageAsset a;
+		a.name    = ImageGen::uniqueName(used, proposed);
+		a.files   = batch.files;
+		a.source  = batch.frames;
+		a.delayMs = (batch.delayMs > 0) ? batch.delayMs : 100;
+		a.sourceName = (batch.files.size() == 1)
+		                   ? QFileInfo(batch.files.first()).fileName()
+		                   : QStringLiteral("%1 等 %2 个文件（合成一个动画）")
+		                         .arg(QFileInfo(batch.files.first()).fileName())
+		                         .arg(batch.files.size());
+		a.opt  = seedOpt;
+		a.step = seedStep;
+		a.note = batchNote(batch);
+		rebuildAsset(a);
+
+		m_assets.append(a);
+		used << a.name;
+	};
+
+	QStringList failed;
+
+	if (merge)
+	{
+		/* 一个批次：GIF 展开、按文件名排序、上限按整批算 */
+		const ImageGen::FrameBatch batch = ImageGen::loadFrames(paths);
+		if (batch.isEmpty())
+		{
+			QMessageBox::warning(this, QStringLiteral("打不开"),
+			                     QStringLiteral("选中的文件都读不出图像：\n%1\n\n"
+			                                    "支持 GIF / PNG / JPG / BMP。")
+			                         .arg(batch.failed.join(QStringLiteral("\n"))));
+			return;
+		}
+		/* 名字和默认目录都取排好序的第一个文件：
+		 * 用户是从对话框里乱选一通的，拿 paths.first() 会得到 a3，
+		 * 而「来源」写的是 a1.png 等 3 个文件，两边对不上。 */
+		const QString first = batch.files.isEmpty() ? paths.first() : batch.files.first();
+		addOne(batch, QFileInfo(first).completeBaseName());
+		m_imgPath = first;
+	}
+	else
+	{
+		/* 每个文件单独读、单独成一份。各份之间没有帧数关系，
+		 * 所以上限按单个文件算就对了。
+		 * 先按文件名自然排序，列表里的顺序才和资源管理器里看到的一致
+		 * （对话框返回的顺序取决于系统，frame10 也可能排在 frame2 前面）。 */
+		QStringList ordered = paths;
+		QCollator collator;
+		collator.setNumericMode(true);
+		collator.setCaseSensitivity(Qt::CaseInsensitive);
+		std::stable_sort(ordered.begin(), ordered.end(),
+		                 [&collator](const QString &a, const QString &b) {
+			                 return collator.compare(QFileInfo(a).fileName(),
+			                                         QFileInfo(b).fileName()) < 0;
+		                 });
+
+		for (const QString &p : ordered)
+		{
+			const ImageGen::FrameBatch batch = ImageGen::loadFrames(QStringList() << p);
+			if (batch.isEmpty())
+			{
+				failed << QFileInfo(p).fileName();
+				continue;
+			}
+			addOne(batch, QFileInfo(p).completeBaseName());
+			m_imgPath = p;
+		}
+
+		if (m_assets.size() == firstRow)
+		{
+			QMessageBox::warning(this, QStringLiteral("打不开"),
+			                     QStringLiteral("这些文件都读不出图像：\n%1\n\n"
+			                                    "支持 GIF / PNG / JPG / BMP。")
+			                         .arg(failed.join(QStringLiteral("\n"))));
+			return;
+		}
+	}
+
+	/* 选中最新加进来的那份，用户刚导完就想看到它 */
+	m_imgCurrent = m_assets.size() - 1;
+	refreshAssetList();
+	showAsset(m_imgCurrent);
+
+	if (!failed.isEmpty())
+	{
+		QMessageBox::warning(this, QStringLiteral("有文件读不出来"),
+		                     QStringLiteral("下面这些读不出图像，已跳过：\n%1")
+		                         .arg(failed.join(QStringLiteral("\n"))));
+	}
+}
+
+void MainWindow::selectAsset(int row)
+{
+	/* 先把上一份的参数存回去 —— 用户改完参数直接点列表里另一份，
+	 * 不存的话这些改动就白改了。 */
+	storeWidgetsToAsset(m_imgCurrent);
+
+	if (row < 0 || row >= m_assets.size())
+	{
+		m_imgCurrent = -1;
+		showAsset(-1);
+		return;
+	}
+	m_imgCurrent = row;
+	showAsset(row);
+}
+
+void MainWindow::removeCurrentAsset()
+{
+	if (!currentAsset())
+	{
+		return;
+	}
+
+	const int row = m_imgCurrent;
+	m_assets.remove(row);
+
+	if (m_assets.isEmpty())
+	{
+		m_imgCurrent = -1;
+		QSignalBlocker block(m_imgList);
+		m_imgList->clear();
+		m_imgPreview->clearFrames();
+		m_imgFileLabel->setText(QStringLiteral("（还没有素材）"));
+		updateImageInfo();
+		return;
+	}
+
+	m_imgCurrent = qMin(row, m_assets.size() - 1);
+	refreshAssetList();          /* 重建列表（信号已挡，选中不会自动触发） */
+	showAsset(m_imgCurrent);
+}
+
+void MainWindow::refreshAssetItem(int row)
+{
+	if (!m_imgList || row < 0 || row >= m_assets.size())
+	{
+		return;
+	}
+	QListWidgetItem *item = m_imgList->item(row);
+	if (!item)
+	{
+		return;
+	}
+
+	const ImageAsset &a = m_assets.at(row);
+	const QString kind = (a.packed.size() > 1)
+	                         ? QStringLiteral("%1 帧").arg(a.packed.size())
+	                         : QStringLiteral("静态");
+	item->setText(QStringLiteral("%1   ·   %2   ·   %3×%4")
+	                  .arg(a.name, kind)
+	                  .arg(a.opt.width)
+	                  .arg(a.opt.height));
+
+	QString tip = a.files.join(QStringLiteral("\n"));
+	if (!a.note.isEmpty())
+	{
+		tip += QLatin1Char('\n') + a.note;
+	}
+	item->setToolTip(tip);
+}
+
+void MainWindow::refreshAssetList()
+{
+	if (!m_imgList)
+	{
+		return;
+	}
+	/* 重建过程中不要触发 currentRowChanged：那会把参数往还没准备好的素材上写 */
+	const QSignalBlocker block(m_imgList);
+
+	m_imgList->clear();
+	for (int i = 0; i < m_assets.size(); ++i)
+	{
+		m_imgList->addItem(new QListWidgetItem());
+		refreshAssetItem(i);
+	}
+	if (m_imgCurrent >= 0 && m_imgCurrent < m_assets.size())
+	{
+		m_imgList->setCurrentRow(m_imgCurrent);
+	}
+}
+
+void MainWindow::storeWidgetsToAsset(int row)
+{
+	if (row < 0 || row >= m_assets.size() || !m_imgSize)
+	{
+		return;
+	}
+	m_assets[row].opt  = imageOptions();
+	m_assets[row].step = frameStep();
+}
+
+void MainWindow::showAsset(int row)
+{
+	m_imgTimer->stop();
+	m_imgPlayBtn->setText(QStringLiteral("播放"));
+
+	const ImageAsset *a = (row >= 0 && row < m_assets.size()) ? &m_assets.at(row) : nullptr;
+	if (!a)
+	{
+		m_imgPreview->clearFrames();
+		m_imgPlayBtn->setEnabled(false);
+		m_imgFileLabel->setText(QStringLiteral("（还没有素材）"));
+		updateImageInfo();
+		return;
+	}
+
+	/* 参数控件跟着换。挡信号是为了别把"换显示"当成"用户改了参数"，
+	 * 那会触发一次多余的重算，还会把改动写回错误的那一份。 */
+	{
+		const QSignalBlocker b1(m_imgSize);
+		const QSignalBlocker b2(m_imgScale);
+		const QSignalBlocker b3(m_imgStep);
+		const QSignalBlocker b4(m_imgThreshold);
+		const QSignalBlocker b5(m_imgDither);
+
+		int idx = m_imgSize->findData(QPoint(a->opt.width, a->opt.height));
+		if (idx >= 0)
+		{
+			m_imgSize->setCurrentIndex(idx);
+		}
+		m_imgScale->setCurrentIndex(a->opt.stretch ? 1 : 0);
+		idx = m_imgStep->findData(a->step);
+		if (idx >= 0)
+		{
+			m_imgStep->setCurrentIndex(idx);
+		}
+		m_imgThreshold->setValue(a->opt.threshold);
+		m_imgThresholdValue->setText(QString::number(a->opt.threshold));
+		m_imgDither->setChecked(a->opt.dither == ImageGen::Bayer);
+	}
+
+	const int delay = qMax(20, effectiveDelayMs());
+	if (a->mono.size() > 1)
+	{
+		m_imgTimer->setInterval(delay);
+	}
+	m_imgPreview->setFrames(a->mono, delay);
+	m_imgPlayBtn->setEnabled(a->mono.size() > 1);
+
+	m_imgFileLabel->setText(assetDetailText(*a));
+	updateImageInfo();
 }
 
 void MainWindow::recomputeImage()
@@ -1515,47 +1885,40 @@ void MainWindow::recomputeImage()
 	m_imgTimer->stop();
 	m_imgPlayBtn->setText(QStringLiteral("播放"));
 
-	m_imgMono.clear();
-	m_imgPacked.clear();
-
-	if (m_imgSource.isEmpty())
+	ImageAsset *a = currentAsset();
+	if (!a)
 	{
 		m_imgPreview->clearFrames();
+		m_imgPlayBtn->setEnabled(false);
 		updateImageInfo();
 		return;
 	}
 
-	const ImageGen::Options opt = imageOptions();
-	const int step = qMax(1, m_imgStep->currentData().toInt());
+	rebuildAsset(*a);
 
-	for (int i = 0; i < m_imgSource.size(); i += step)
+	const int delay = qMax(20, effectiveDelayMs());
+	if (a->mono.size() > 1)
 	{
-		const QVector<quint8> bytes = ImageGen::convert(m_imgSource.at(i), opt);
-		m_imgPacked.append(bytes);
-		/* 预览用"从显存字节还原出来的图"，保证看到的就是要烧进去的数据 */
-		m_imgMono.append(ImageGen::unpackFromDisplay(bytes, opt.width, opt.height));
+		m_imgTimer->setInterval(delay);
 	}
+	m_imgPreview->setFrames(a->mono, delay);
+	m_imgPlayBtn->setEnabled(a->mono.size() > 1);
 
-	/* 预览也按"抽帧后的真实速度"播，否则屏上看着快、烧进去却慢（或反过来） */
-	const int delay = effectiveDelayMs();
-	m_imgPreview->setFrames(m_imgMono, delay);
-
-	if (m_imgMono.size() > 1)
-	{
-		m_imgTimer->setInterval(qMax(20, delay));
-	}
-
+	m_imgFileLabel->setText(assetDetailText(*a));
+	refreshAssetItem(m_imgCurrent);     /* 帧数/尺寸可能变了，列表那行跟着更新 */
 	updateImageInfo();
 }
 
 void MainWindow::updateImageInfo()
 {
-	if (m_imgPacked.isEmpty())
+	const ImageAsset *a = currentAsset();
+
+	if (!a || a->packed.isEmpty())
 	{
 		const qint64 cap = flashCapacity();
-		QString tip = (m_imgMulti && m_imgMulti->isChecked())
-		                  ? QStringLiteral("选一张或多张图片开始。")
-		                  : QStringLiteral("选一张图片或 GIF 开始。");
+		QString tip = (m_assets.isEmpty())
+		                  ? QStringLiteral("添加一张图片或动图开始。")
+		                  : QStringLiteral("在左边列表里选一份素材。");
 		if (cap > 0)
 		{
 			/* 按实际容量和当前选的尺寸举例：512KB 的芯片能放 512 帧，
@@ -1574,9 +1937,8 @@ void MainWindow::updateImageInfo()
 		return;
 	}
 
-	const ImageGen::Options opt = imageOptions();
-	const int frames = m_imgPacked.size();
-	const int per    = ImageGen::bytesPerFrame(opt.width, opt.height);
+	const int frames = a->packed.size();
+	const int per    = ImageGen::bytesPerFrame(a->opt.width, a->opt.height);
 	const int total  = per * frames;
 
 	/* 阈值按占芯片容量的比例算，不再用 8KB / 32KB 这种绝对数：
@@ -1627,7 +1989,27 @@ void MainWindow::updateImageInfo()
 		 * 只有一帧时不提 —— 静态图没有"播放快慢"这回事。 */
 		html += QStringLiteral("<br/>已抽帧：每 %1 帧取 1，延时按 ×%1 放大（GIF 原始 %2 ms）")
 		            .arg(frameStep())
-		            .arg(m_imgDelayMs);
+		            .arg(a->delayMs);
+	}
+
+	/* 有多份素材时，单看这一份算不出整个工程的占用，补一行合计 */
+	if (m_assets.size() > 1)
+	{
+		int allFrames = 0;
+		qint64 allBytes = 0;
+		for (const ImageAsset &x : m_assets)
+		{
+			allFrames += x.packed.size();
+			allBytes  += qint64(ImageGen::bytesPerFrame(x.opt.width, x.opt.height))
+			             * x.packed.size();
+		}
+		const double allPct = (cap > 0) ? (allBytes * 100.0 / cap) : 0.0;
+		html += QStringLiteral("<br/>列表里共 %1 份素材：%2 帧、%3 KB（占 %4）")
+		            .arg(m_assets.size())
+		            .arg(allFrames)
+		            .arg(allBytes / 1024.0, 0, 'f', 1)
+		            .arg(cap > 0 ? QStringLiteral("%1%").arg(allPct, 0, 'f', 1)
+		                         : QStringLiteral("—"));
 	}
 
 	m_imgInfo->setText(html);
@@ -1635,7 +2017,8 @@ void MainWindow::updateImageInfo()
 
 void MainWindow::togglePlayback()
 {
-	if (m_imgMono.size() < 2)
+	const ImageAsset *a = currentAsset();
+	if (!a || a->mono.size() < 2)
 	{
 		return;
 	}
@@ -1653,57 +2036,137 @@ void MainWindow::togglePlayback()
 
 void MainWindow::exportAnimHeader()
 {
-	if (m_imgPacked.isEmpty())
+	const ImageAsset *a = currentAsset();
+	if (!a || a->packed.isEmpty())
 	{
-		QMessageBox::information(this, QStringLiteral("还没有数据"),
-		                         QStringLiteral("先选一张图片或 GIF。"));
+		QMessageBox::information(this, QStringLiteral("还没有素材"),
+		                         QStringLiteral("先添加一张图片或动图。"));
 		return;
 	}
 
-	QString start = QFileInfo(m_imgPath).absolutePath() + QStringLiteral("/anim.h");
+	const QString baseName = a->name + QStringLiteral(".h");
+	QString start = QFileInfo(m_imgPath).absolutePath() + QLatin1Char('/') + baseName;
 	if (!m_headerPath.isEmpty())
 	{
-		start = QFileInfo(m_headerPath).absolutePath() + QStringLiteral("/anim.h");
+		start = QFileInfo(m_headerPath).absolutePath() + QLatin1Char('/') + baseName;
 	}
 
 	const QString path = QFileDialog::getSaveFileName(
-		this, QStringLiteral("导出动画头文件"), start,
+		this, QStringLiteral("导出素材头文件"), start,
 		QStringLiteral("C 头文件 (*.h)"));
 	if (path.isEmpty())
 	{
 		return;
 	}
 
-	const ImageGen::Options opt = imageOptions();
-	/* 来源写 m_imgSourceName：多选合并时它写的是"a.png 等 8 个文件"，
-	 * 单看第一个文件名会以为动画只有一张图。 */
-	const QString src = m_imgSourceName.isEmpty() ? QStringLiteral("未记录") : m_imgSourceName;
-	const QString content = ImageGen::renderHeader(m_imgPacked, opt, effectiveDelayMs(), src);
-
-	QFile file(path);
-	if (!file.open(QIODevice::WriteOnly | QIODevice::Text))
+	/* 标识符按素材名加前缀（logo → LOGO_WIDTH / Logo_ShowFrame），
+	 * 多份素材的头文件才能同时进一个工程。 */
+	const QString err = ImageGen::writeHeaderFile(
+		path, a->packed, a->opt, effectiveDelayMs(),
+		a->sourceName.isEmpty() ? QStringLiteral("未记录") : a->sourceName,
+		a->name);
+	if (!err.isEmpty())
 	{
 		QMessageBox::critical(this, QStringLiteral("写不进去"),
-		                      QStringLiteral("%1\n\n%2").arg(path, file.errorString()));
+		                      QStringLiteral("%1\n\n%2").arg(path, err));
 		return;
 	}
-	QTextStream ts(&file);
-	ts.setEncoding(QStringConverter::Utf8);
-	ts << content;
-	file.close();
 
-	const int total = m_imgPacked.size()
-	                  * ImageGen::bytesPerFrame(opt.width, opt.height);
+	const int total = a->packed.size() * ImageGen::bytesPerFrame(a->opt.width, a->opt.height);
+	const QString prefix = ImageGen::sanitizeIdentifier(a->name);
 
 	QMessageBox::information(this, QStringLiteral("导出成功"),
 		QStringLiteral("已写入：\n%1\n\n%2 帧，共 %3 字节（%4 KB）\n\n"
-		               "头文件里已带 Anim_ShowFrame()，不需要你写批量写显存的函数。\n"
-		               "只要把文件里【适配区】的两个宏指向你工程的写命令、写数据函数，\n"
-		               "再循环调用 Anim_ShowFrame(i) 就能动起来。")
+		               "宏和函数以 %5_ 打头（%6_WIDTH、%6_ShowFrame），"
+		               "和别的素材头文件放进同一个工程不会撞定义。\n"
+		               "把【适配区】两个宏指向你的写命令、写数据函数，"
+		               "再循环调用 %6_ShowFrame(i) 就行。")
 		.arg(path)
-		.arg(m_imgPacked.size())
+		.arg(a->packed.size())
 		.arg(total)
-		.arg(total / 1024.0, 0, 'f', 1));
+		.arg(total / 1024.0, 0, 'f', 1)
+		.arg(prefix.toUpper())
+		.arg(prefix));
+}
+
+void MainWindow::exportAllAssets()
+{
+	if (m_assets.isEmpty())
+	{
+		QMessageBox::information(this, QStringLiteral("还没有素材"),
+		                         QStringLiteral("先添加图片或动图。"));
+		return;
+	}
+
+	const QString start = !m_headerPath.isEmpty()
+	                          ? QFileInfo(m_headerPath).absolutePath()
+	                          : (m_imgPath.isEmpty() ? QDir::homePath()
+	                                                 : QFileInfo(m_imgPath).absolutePath());
+
+	const QString dir = QFileDialog::getExistingDirectory(
+		this, QStringLiteral("选择目录（每份素材各写一个 .h）"), start);
+	if (dir.isEmpty())
+	{
+		return;
+	}
+
+	/* 素材名唯一（导进来时就去重了），所以文件名也唯一。
+	 * 覆盖前问一次：全部导出的按钮很容易误点，闷头覆盖太危险。 */
+	QStringList targets;
+	QStringList conflicts;
+	for (const ImageAsset &a : m_assets)
+	{
+		const QString p = QDir(dir).filePath(a.name + QStringLiteral(".h"));
+		targets << p;
+		if (QFileInfo::exists(p))
+		{
+			conflicts << a.name + QStringLiteral(".h");
+		}
+	}
+	if (!conflicts.isEmpty())
+	{
+		const auto ret = QMessageBox::question(
+			this, QStringLiteral("有同名文件"),
+			QStringLiteral("%1 里已经有 %2 个同名文件：\n%3\n\n覆盖吗？")
+				.arg(dir)
+				.arg(conflicts.size())
+				.arg(conflicts.join(QStringLiteral("、"))),
+			QMessageBox::Yes | QMessageBox::No, QMessageBox::No);
+		if (ret != QMessageBox::Yes)
+		{
+			return;
+		}
+	}
+
+	QStringList written;
+	QStringList errors;
+	for (int i = 0; i < m_assets.size(); ++i)
+	{
+		const ImageAsset &a = m_assets.at(i);
+		const QString err = ImageGen::writeHeaderFile(
+			targets.at(i), a.packed, a.opt,
+			qMax(1, a.delayMs) * qMax(1, a.step),
+			a.sourceName.isEmpty() ? QStringLiteral("未记录") : a.sourceName,
+			a.name);
+		if (!err.isEmpty())
+		{
+			errors << QStringLiteral("%1：%2").arg(a.name + QStringLiteral(".h"), err);
+			continue;
+		}
+		written << a.name + QStringLiteral(".h");
+	}
+
+	QString msg = QStringLiteral("已写入 %1 个文件到：\n%2\n\n%3")
+	                  .arg(written.size())
+	                  .arg(dir)
+	                  .arg(written.join(QStringLiteral("、")));
+	if (!errors.isEmpty())
+	{
+		msg += QStringLiteral("\n\n失败 %1 个：\n%2")
+		           .arg(errors.size())
+		           .arg(errors.join(QStringLiteral("\n")));
+	}
+	QMessageBox::information(this, QStringLiteral("导出完成"), msg);
 }
 
 /* ==========================================================================

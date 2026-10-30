@@ -64,11 +64,39 @@ public:
     /*
      * 生成 C 头文件的内容。
      * frames 里每个元素是一帧的显存字节（长度必须都等于 bytesPerFrame）。
+     *
+     * ident 给多份素材共存时用：传了就把 ANIM_* / Anim_* 这类标识符
+     * 换成以它打头的名字（logo → LOGO_WIDTH / Logo_ShowFrame），
+     * 几份头文件就能同时 include 进一个工程，不会撞宏定义。
+     * 不传（空）时输出和以前逐字节相同。
      */
     static QString renderHeader(const QVector<QVector<quint8>> &frames,
                                 const Options &opt,
                                 int delayMs,
-                                const QString &sourceName);
+                                const QString &sourceName,
+                                const QString &ident = QString());
+
+    /*
+     * 渲染并写盘（UTF-8）。成功返回空字符串，失败返回原因。
+     * 单份导出和"每份一个 .h"都走这里，省得两处各写一遍打开/写/关。
+     */
+    static QString writeHeaderFile(const QString &path,
+                                   const QVector<QVector<quint8>> &frames,
+                                   const Options &opt,
+                                   int delayMs,
+                                   const QString &sourceName,
+                                   const QString &ident = QString());
+
+    /*
+     * 把任意字符串收拾成能当 C 标识符的名字：
+     * 只留字母数字下划线，其余换成下划线，数字开头补前缀，空的话给个兜底。
+     * "我的图标.png" 这类中文名过不了 C 编译器，必须有这一步。
+     */
+    static QString sanitizeIdentifier(const QString &name);
+
+    /* 在 used 里挑一个没被占用的名字：logo → logo_2 → logo_3 …
+     * 比较忽略大小写，因为宏前缀会整体转大写，"Logo" 和 "logo" 一样撞车。 */
+    static QString uniqueName(const QStringList &used, const QString &proposed);
 
     /*
      * 一批图片文件的读取结果。

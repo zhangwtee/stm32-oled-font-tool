@@ -508,6 +508,112 @@ int main(int argc, char **argv)
 		check("混选时延时取 GIF 的", mix.delayMs == gb.delayMs);
 	}
 
+	/* ---------------- 多份素材：名字与标识前缀 ---------------- */
+	std::printf("[多份素材]\n");
+	{
+		/* 文件名直接拿来当标题，得先过成合法 C 标识符 */
+		check("中文名退回兜底名",
+		      ImageGen::sanitizeIdentifier(QStringLiteral("图标")) == QStringLiteral("image"),
+		      ImageGen::sanitizeIdentifier(QStringLiteral("图标")));
+		check("空格和标点变下划线",
+		      ImageGen::sanitizeIdentifier(QStringLiteral("my logo-1")) == QStringLiteral("my_logo_1"),
+		      ImageGen::sanitizeIdentifier(QStringLiteral("my logo-1")));
+		check("数字开头补前缀",
+		      ImageGen::sanitizeIdentifier(QStringLiteral("2nd_icon")) == QStringLiteral("img_2nd_icon"),
+		      ImageGen::sanitizeIdentifier(QStringLiteral("2nd_icon")));
+		check("下划线不堆叠",
+		      ImageGen::sanitizeIdentifier(QStringLiteral("a b  c")) == QStringLiteral("a_b_c"),
+		      ImageGen::sanitizeIdentifier(QStringLiteral("a b  c")));
+		check("首尾下划线去掉",
+		      ImageGen::sanitizeIdentifier(QStringLiteral("_logo_")) == QStringLiteral("logo"),
+		      ImageGen::sanitizeIdentifier(QStringLiteral("_logo_")));
+		check("本来就合法的不动",
+		      ImageGen::sanitizeIdentifier(QStringLiteral("logo32")) == QStringLiteral("logo32"),
+		      ImageGen::sanitizeIdentifier(QStringLiteral("logo32")));
+
+		/* 同名文件从两个目录一起导进来很常见 */
+		QStringList used;
+		used << QStringLiteral("logo");
+		check("重名加 _2", ImageGen::uniqueName(used, QStringLiteral("logo")) == QStringLiteral("logo_2"));
+		used << QStringLiteral("logo_2");
+		check("再重名加 _3", ImageGen::uniqueName(used, QStringLiteral("logo")) == QStringLiteral("logo_3"));
+		check("大小写也算撞名",
+		      ImageGen::uniqueName(used, QStringLiteral("LOGO")) == QStringLiteral("LOGO_3"),
+		      ImageGen::uniqueName(used, QStringLiteral("LOGO")));
+		check("没撞名就用原名",
+		      ImageGen::uniqueName(used, QStringLiteral("icon")) == QStringLiteral("icon"));
+
+		/* 头文件里的宏和函数都要跟着素材名走，否则两份 .h 不能同时 include */
+		ImageGen::Options opt;
+		opt.width  = 128;
+		opt.height = 32;
+		QVector<QVector<quint8>> frames;
+		frames.append(QVector<quint8>(ImageGen::bytesPerFrame(128, 32), 0x3C));
+
+		const QString def  = ImageGen::renderHeader(frames, opt, 80, QStringLiteral("a.gif"));
+		const QString logo = ImageGen::renderHeader(frames, opt, 80, QStringLiteral("a.gif"),
+		                                            QStringLiteral("logo"));
+
+		check("默认输出不带前缀（老行为不变）",
+		      def.contains(QStringLiteral("#define ANIM_WIDTH      128")) &&
+		          def.contains(QStringLiteral("void Anim_ShowFrame")),
+		      QStringLiteral("默认输出被改动了"));
+		check("指定 ident 后宏换前缀",
+		      logo.contains(QStringLiteral("#define LOGO_WIDTH      128")) &&
+		          logo.contains(QStringLiteral("#define LOGO_COL_OFFSET")),
+		      QStringLiteral("没找到 LOGO_WIDTH"));
+		check("指定 ident 后函数/数组换前缀",
+		      logo.contains(QStringLiteral("Logo_ShowFrame")) &&
+		          logo.contains(QStringLiteral("const uint8_t Logo_Frames")),
+		      QStringLiteral("没找到 Logo_ShowFrame"));
+		check("include guard 也分开",
+		      logo.contains(QStringLiteral("__LOGO_FRAMES_H")) &&
+		          def.contains(QStringLiteral("__ANIM_FRAMES_H")),
+		      QStringLiteral("guard 撞了"));
+		check("老的 ANIM_ 一个不剩",
+		      !logo.contains(QStringLiteral("ANIM_")),
+		      QStringLiteral("还有残留的 ANIM_"));
+		check("两份头文件的宏不重叠",
+		      !logo.contains(QStringLiteral("#define ANIM_WIDTH")),
+		      QStringLiteral("LOGO 头里还有 ANIM_WIDTH"));
+
+		/* 名字全是标点时兜底成 image，不能生成空的宏前缀 */
+		const QString odd = ImageGen::renderHeader(frames, opt, 80, QStringLiteral("x"),
+		                                           QStringLiteral("图标"));
+		check("中文 ident 退回 image 前缀",
+		      odd.contains(QStringLiteral("#define IMAGE_WIDTH")),
+		      QStringLiteral("没有退回 IMAGE_"));
+
+		/* 写盘：内容要和 renderHeader 一致，失败要给出原因而不是静默 */
+		const QString one = QDir(outDir).absoluteFilePath(QStringLiteral("logo.h"));
+		const QString werr = ImageGen::writeHeaderFile(
+		    one, frames, opt, 80, QStringLiteral("logo.png"), QStringLiteral("logo"));
+		check("写盘成功时返回空", werr.isEmpty(), werr);
+
+		QFile wf(one);
+		const bool opened = wf.open(QIODevice::ReadOnly);
+		QString written = opened ? QString::fromUtf8(wf.readAll()) : QString();
+		wf.close();
+		/* 写盘走 QIODevice::Text，Windows 上换行会变成 CRLF，
+		 * 比较前先归一化 —— 内容本身必须和 renderHeader 一模一样 */
+		check("写出来的内容就是 renderHeader 的结果",
+		      written.count(QLatin1Char('\n')) > 0 &&
+		          written.replace(QStringLiteral("\r\n"), QStringLiteral("\n"))
+		              == ImageGen::renderHeader(frames, opt, 80,
+		                                        QStringLiteral("logo.png"),
+		                                        QStringLiteral("logo")),
+		      QStringLiteral("%1 字节").arg(written.size()));
+		check("写出来的文件带前缀", written.contains(QStringLiteral("#define LOGO_WIDTH")));
+
+		const QString bad = ImageGen::writeHeaderFile(
+		    QDir(outDir).absoluteFilePath(QStringLiteral("no_such_dir/x.h")),
+		    frames, opt, 80, QStringLiteral("x"), QStringLiteral("x"));
+		check("目录不存在时返回原因", !bad.isEmpty(), QStringLiteral("返回空"));
+		check("空路径被挡住",
+		      !ImageGen::writeHeaderFile(QString(), frames, opt, 80,
+		                                 QStringLiteral("x")).isEmpty());
+	}
+
 	std::printf("\n%d passed, %d failed\n", g_pass, g_fail);
 	return g_fail == 0 ? 0 : 1;
 }

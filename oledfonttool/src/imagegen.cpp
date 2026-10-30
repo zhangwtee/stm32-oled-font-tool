@@ -1,10 +1,13 @@
 #include "imagegen.h"
 
 #include <QCollator>
+#include <QFile>
 #include <QFileInfo>
 #include <QImageReader>
 #include <QPainter>
 #include <QStringList>
+#include <QStringConverter>
+#include <QTextStream>
 
 #include <algorithm>
 
@@ -178,10 +181,82 @@ QVector<quint8> ImageGen::convert(const QImage &src, const Options &opt)
  * 生成头文件。
  * 数据按页排列，MCU 侧显示一帧就是"逐页写一整行"，不需要任何转换。
  */
+QString ImageGen::sanitizeIdentifier(const QString &name)
+{
+    QString out;
+    out.reserve(name.size());
+    for (const QChar c : name)
+    {
+        if ((c >= QLatin1Char('0') && c <= QLatin1Char('9')) ||
+            (c >= QLatin1Char('a') && c <= QLatin1Char('z')) ||
+            (c >= QLatin1Char('A') && c <= QLatin1Char('Z')) ||
+            c == QLatin1Char('_'))
+        {
+            out.append(c);
+        }
+        else if (!out.endsWith(QLatin1Char('_')))
+        {
+            /* 连续的非字母数字只算一个下划线：
+             * "a b  c" 变成 a_b_c，而不是 a___b___c 这种读不出原意的名字。 */
+            out.append(QLatin1Char('_'));
+        }
+    }
+    while (out.startsWith(QLatin1Char('_')))
+    {
+        out.remove(0, 1);
+    }
+    while (out.endsWith(QLatin1Char('_')))
+    {
+        out.chop(1);
+    }
+
+    if (out.isEmpty())
+    {
+        return QStringLiteral("image");
+    }
+    /* C 标识符不能数字开头 */
+    if (out.at(0).isDigit())
+    {
+        out.prepend(QStringLiteral("img_"));
+    }
+    return out;
+}
+
+QString ImageGen::uniqueName(const QStringList &used, const QString &proposed)
+{
+    const QString base = sanitizeIdentifier(proposed);
+
+    auto taken = [&used](const QString &n) {
+        for (const QString &u : used)
+        {
+            if (u.compare(n, Qt::CaseInsensitive) == 0)
+            {
+                return true;
+            }
+        }
+        return false;
+    };
+
+    if (!taken(base))
+    {
+        return base;
+    }
+    for (int i = 2; i < 10000; ++i)
+    {
+        const QString candidate = QStringLiteral("%1_%2").arg(base).arg(i);
+        if (!taken(candidate))
+        {
+            return candidate;
+        }
+    }
+    return base;
+}
+
 QString ImageGen::renderHeader(const QVector<QVector<quint8>> &frames,
                                const Options &opt,
                                int delayMs,
-                               const QString &sourceName)
+                               const QString &sourceName,
+                               const QString &ident)
 {
     const int frameSize = bytesPerFrame(opt.width, opt.height);
     const int count = frames.size();
@@ -422,7 +497,52 @@ QString ImageGen::renderHeader(const QVector<QVector<quint8>> &frames,
     s += QStringLiteral("}\n\n");
 
     s += QStringLiteral("#endif /* __ANIM_FRAMES_H */\n");
+
+    /* 换前缀放在最后做：整份文本里 ANIM_* / Anim_* 就是全部对外名字，
+     * 逐处改成变量反而容易漏一个（漏了就是两份头文件撞定义，编译期才炸）。
+     * 注释里的名字也跟着换，注释才和代码对得上。
+     * ident 为空 = 老行为，一个字节都不动。 */
+    if (!ident.isEmpty())
+    {
+        QString obj = sanitizeIdentifier(ident);
+        obj[0] = obj.at(0).toUpper();
+
+        /* __ANIM_FRAMES_H 也走这条替换，所以 include guard 天然不撞 */
+        s.replace(QStringLiteral("ANIM_"), obj.toUpper() + QLatin1Char('_'));
+        s.replace(QStringLiteral("Anim_"), obj + QLatin1Char('_'));
+    }
     return s;
+}
+
+QString ImageGen::writeHeaderFile(const QString &path,
+                                  const QVector<QVector<quint8>> &frames,
+                                  const Options &opt,
+                                  int delayMs,
+                                  const QString &sourceName,
+                                  const QString &ident)
+{
+    if (path.isEmpty())
+    {
+        return QStringLiteral("没有指定文件名");
+    }
+
+    QFile file(path);
+    if (!file.open(QIODevice::WriteOnly | QIODevice::Text))
+    {
+        return file.errorString();
+    }
+
+    QTextStream ts(&file);
+    ts.setEncoding(QStringConverter::Utf8);
+    ts << renderHeader(frames, opt, delayMs, sourceName, ident);
+
+    /* 显式 close 再看错误：磁盘满这类问题在写的时候不报，落盘那一步才报 */
+    file.close();
+    if (file.error() != QFileDevice::NoError)
+    {
+        return file.errorString();
+    }
+    return QString();
 }
 
 /* ==========================================================================

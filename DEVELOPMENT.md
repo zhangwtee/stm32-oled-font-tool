@@ -1009,3 +1009,110 @@ skippedFiles / truncated / cappedByCount / cappedByMemory / failed`。
   首帧 640×480）`、预览帧号 `1 / 3`、容量 `3 帧 × 1024 字节 = 3072 字节`。
   不勾多选再导一次 `move.gif`：`（3 帧，原尺寸 64×64）`、帧延时 80 ms
   取自 GIF —— 老路径没被改坏。
+
+## 图片页改成「素材列表」：多张图分开存，而不是只能拼一个动画
+
+上一轮把"多选"实现成了"合成一个动画"。用户的真实需求不是这个：
+
+> 可以导入多张图片或者动图，但是不一定要合成动画，可以分开存放
+
+工程里本来就会同时有好几张图 —— 开机图、logo、几个图标，尺寸和阈值都不一样。
+原来的图片页只有一个槽位，导完一张换下一张，前一张的取模设置就丢了。
+所以这轮把它改成列表。
+
+### 结构
+
+```cpp
+struct ImageAsset
+{
+    QString                  name;       // 列表名 = 导出文件名 = 标识前缀
+    QStringList              files;
+    QString                  sourceName; // 头文件「来源」那行
+    QVector<QImage>          source;     // 原始帧
+    QVector<QImage>          mono;       // 单色化（预览）
+    QVector<QVector<quint8>> packed;     // 显存字节（导出）
+    int                      delayMs = 100;
+    ImageGen::Options        opt;        // 每份素材自己的尺寸/阈值/抖动
+    int                      step = 1;
+    QString                  note;       // 导入时的截断/读不出提醒
+};
+QVector<ImageAsset> m_assets;
+int                 m_imgCurrent = -1;
+```
+
+`mono` / `packed` 缓存在素材里，从列表切回来时不用重跑缩放和抖动。
+
+一份素材的完整参数存在它自己身上，所以"改完 A 的阈值、切到 B、再切回 A"
+阈值还在。这是这个结构唯一真正的意义。
+
+### 交互
+
+- 「添加图片 / 动图…」永远允许一次多选，处理方式由「多选时合成一个动画」决定：
+  勾上 → 走 `loadFrames(paths)` 合成一份；不勾 → 每个文件单独 `loadFrames({p})`，
+  各自成一份。默认不勾（"各存一份"才是常见用法）。
+- 切换选中：`selectAsset(row)` 先把当前控件值 `storeWidgetsToAsset(旧行)`，
+  再按新素材的 `opt` / `step` 摆控件。**顺序反了就把改动写到错的那份上**，
+  这是这类"列表 + 参数面板"最容易出的 bug。
+- 摆控件时用 `QSignalBlocker` 挡住 5 个控件的信号，否则"换显示"会被当成
+  "用户改了参数"，触发一次多余重算并写回错误的行。
+- 列表刷新（增删）也用 `QSignalBlocker`，`refreshAssetList()` 之后手动 `showAsset()`。
+- 新素材的名字取文件名、过 `sanitizeIdentifier`、重名加 `_2`，三处共用
+  （列表显示 / 导出文件名 / 头文件前缀）。
+
+### 头文件命名：不加前缀就没法同时用一个工程
+
+原来所有标识符是写死的 `ANIM_WIDTH` / `Anim_Frames` / `Anim_ShowFrame`，
+include guard 也是 `__ANIM_FRAMES_H`。两份素材各导一个 `.h` 就必然撞：
+宏重定义、数组重复定义、guard 只有第一个生效。那"分开存放"根本用不起来。
+
+于是 `renderHeader` 多了一个 `ident` 参数，实现方式是**最后统一替换**：
+
+```cpp
+if (!ident.isEmpty())
+{
+    QString obj = sanitizeIdentifier(ident);
+    obj[0] = obj.at(0).toUpper();
+    s.replace("ANIM_", obj.toUpper() + "_");
+    s.replace("Anim_", obj + "_");
+}
+```
+
+为什么不逐处改成变量：整份文本里 `ANIM_*` / `Anim_*` 就是全部对外名字，
+逐处替换漏一个就是编译期才炸的错误；整体替换连注释里的名字都对得上。
+不传 `ident` 时一个字节都不动，老输出完全不变（有测试盯着）。
+
+`sanitizeIdentifier` 处理中文名（`图标` → `image`）、空格标点（`my logo-1`
+→ `my_logo_1`）、数字开头（`2nd` → `img_2nd`）、连续下划线；`uniqueName`
+忽略大小写去重（`Logo` 和 `logo` 的宏前缀会撞）。
+
+### 写盘也抽出来
+
+`ImageGen::writeHeaderFile(path, frames, opt, delay, source, ident)` 返回
+空串表示成功、否则是原因。单份导出和"全部导出"都走它，省得两处各写一遍
+打开/写/关，也让"写出来的内容 == renderHeader 的结果"这件事可以被测试。
+
+### 验证
+
+- `test_emit` 新增 21 项（92 项全过，另有 test_probe 9、test_chip 28、
+  test_merge 10，合计 139）：标识符清洗 6 项、重名 4 项、前缀替换 6 项
+  （含"默认输出不带前缀"这条回归）、写盘 5 项（成功返回空、内容与
+  `renderHeader` 一致、带前缀、目录不存在返回原因、空路径被挡）。
+  写盘比较前要把 `\r\n` 归一化 —— `QIODevice::Text` 在 Windows 上会转 CRLF。
+- 端到端：对话框里乱序填 `"a3.png" "a1.png" "a2.png"`
+  → 列表按 `a1 / a2 / a3` 排好（不勾合并时段内也按文件名排序），
+  点 a1 预览换成 A、文件名标签变 `a1.png`、提示区多一行
+  `列表里共 3 份素材：3 帧、3.0 KB（占 4.7%）`；
+  勾上「合成一个动画」再导同一批 → 只有一条 `a1 · 3 帧 · 128×64`，
+  预览 `1 / 3`；点「移除」列表清空、预览回到占位文字。截图逐张确认过。
+- **导出对话框没法自动化**：这台机器上 Qt 用的是新版 `IFileDialog`
+  （`DUIViewWndClassName` + DirectUIHWND），文件名框不是枚举得到的 `Edit`
+  控件，`WM_SETTEXT` / `CDM_SETCONTROLTEXT` / `BM_CLICK` 全部无效，
+  对话框会一直挂着。所以导出这一层只做了单元测试（内容、前缀、写盘错误），
+  对话框那几行（默认文件名、目录、覆盖询问）是人工读代码确认的。
+
+### 顺手修的
+
+- 合并模式下素材名原来取 `paths.first()`（用户乱选时的第一个），
+  而「来源」写的是排序后第一个文件名，两边对不上（列表显示 `a3`、
+  来源写 `a1.png 等 3 个文件`）。改成取 `batch.files.first()`。
+- 不合并时也先按文件名自然排序再逐条读，列表顺序和资源管理器一致。
