@@ -1,4 +1,4 @@
-﻿# OLED 汉字取模工具 —— 构建脚本
+﻿# OLED 点阵取模工具 —— 构建脚本
 #
 # 双击本文件即可构建（.ps1 的文件关联是好的，不像 .bat/.cmd 在你机器上被改坏了）。
 # 也可以在命令行里跑： powershell -ExecutionPolicy Bypass -File build.ps1
@@ -196,7 +196,7 @@ function Die($msg) {
 
 # ---- 开始 ----
 '============================================================' | Set-Content -LiteralPath $log -Encoding UTF8
-Say ' OLED 汉字取模工具 - 构建'
+Say ' OLED 点阵取模工具 - 构建'
 Say '============================================================'
 Say " 构建类型: $Config"
 Say " 源码目录: $src"
@@ -248,6 +248,30 @@ Say "      OK  cl.exe -> $($cl.Source)"
 # 坏了，报成 "The C++ compiler ... is broken" —— 跟 cl.exe 一点关系都没有，
 # 对着那句话排查会走很远。宁可在这里当场停下，把话说准。
 $rc = Get-Command rc.exe -ErrorAction SilentlyContinue
+
+# vcvars 要靠 reg.exe 查注册表才知道 SDK 的 bin 在哪。注册表被安全策略拦、
+# 或者 SDK 只装了头文件/库没装命令行工具时，rc.exe 就进不了 PATH。
+# 加了 app.rc（图标 + 版本信息）之后 rc.exe 不再是"顺便编 manifest"用的，
+# 没有它整次构建直接停下，所以这里主动扫一遍 SDK 目录兜底 ——
+# 走的全是文件系统，不碰 reg.exe。真实机器上通常上面就找到了，不会走到这里。
+if (-not $rc) {
+    $kitBin = 'C:\Program Files (x86)\Windows Kits\10\bin'
+    if (Test-Path $kitBin) {
+        $cand = Get-ChildItem $kitBin -Directory -ErrorAction SilentlyContinue |
+                Sort-Object Name -Descending |
+                ForEach-Object { Join-Path $_.FullName 'x64\rc.exe' } |
+                Where-Object { Test-Path $_ } |
+                Select-Object -First 1
+        if ($cand) {
+            $env:PATH = (Split-Path $cand -Parent) + ';' + $env:PATH
+            $rc = Get-Command rc.exe -ErrorAction SilentlyContinue
+            if ($rc) {
+                Say "      （reg.exe 查不到 SDK，已按目录扫到：$(Split-Path $cand -Parent)）"
+            }
+        }
+    }
+}
+
 if (-not $rc) {
     Say '      FAIL 找不到 rc.exe'
     Say ''
@@ -300,7 +324,7 @@ if ($LASTEXITCODE -ne 0) {
 
 # ---- [5/6] 部署 Qt 运行库 ----
 Say '[5/6] 部署 Qt 运行库...'
-$exe = Join-Path $build 'oledfonttool.exe'
+$exe = Join-Path $build 'oledmatrix.exe'
 
 # windeployqt 会探测 exe 是 Debug 还是 Release，自动拷对应的 DLL
 # （Debug 版是 Qt6Widgetsd.dll，带 d）。
@@ -431,7 +455,7 @@ function Test-DebugRuntime($name) {
 # Qt 运行库。跳过调试版（双保险：上面已经清理过，这里再挡一道）
 $skipped = @()
 Get-ChildItem $build -File -Filter '*.dll' | ForEach-Object {
-    if ($_.Name -like 'oledfonttool*') { return }
+    if ($_.Name -like 'oledmatrix*') { return }
     if (Test-DebugRuntime $_.Name) { $skipped += $_.Name; return }
     Copy-Item $_.FullName -Destination $pkg -Force
 }
@@ -472,18 +496,36 @@ Remove-Item (Join-Path $pkg 'networkinformation') -Recurse -Force -ErrorAction S
 
 # 附一份使用说明，别人拿到就能用
 $readme = @"
-OLED 汉字取模工具  ($Config 版)
+OLED 点阵取模工具  ($Config 版)
 ================================
 
-双击 oledfonttool.exe 运行。不需要安装 Qt，也不需要编译器。
+双击 oledmatrix.exe 运行。不需要安装 Qt，也不需要编译器。
 
-用法
-----
+这个程序做三件事
+----------------
+1. 汉字字库：输入文字 → 实时看点阵 → 导出 OLED_CFont.h
+2. 图片 / 动画：一张图或一个 GIF → 二值化成 128x64 点阵 → 导出成 C 数组
+3. 芯片容量：读工程里的 .uvprojx / .ld，算出 Flash 够不够放这些点阵
+
+汉字字库
+--------
 1. 左边输入要显示的汉字（多行也可以，会自动去重）
 2. 选字号：16x16（默认，最省 Flash）、24x24、32x32（大字）
 3. 右边实时显示点阵，调阈值看效果
 4. 点「导出 OLED_CFont.h」生成字库
 5. 把生成的文件放进 Keil 工程的 Hardware 目录，Rebuild 即可
+
+图片 / 动画
+-----------
+1. 切到「图片 / 动画」页，点「添加图片…」，可以一次选多张（也可以选 GIF）
+2. 每张图各成一份素材，排在左边列表里；点中哪份，右边就显示哪份的点阵
+3. 三种导出方式：
+     「导出这份 .h」        只导当前这一份
+     「全部导出…」          每份素材各写一个 <素材名>.h
+     「全部存进一个 .h…」   所有素材写进同一个文件，但仍然各自独立，
+                            不是合成一段动画；每份点阵上方都写着它来自哪个文件
+   每份素材的宏和函数都带素材名前缀（logo.png → LOGO_WIDTH / Logo_ShowFrame），
+   所以几份可以同时 include 进同一个工程，不会撞宏定义、不会重复定义数组。
 
 注意
 ----

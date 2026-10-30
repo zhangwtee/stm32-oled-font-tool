@@ -1,0 +1,51 @@
+/*
+ * Windows 资源：程序图标 + 版本信息。
+ *
+ * 之前没有这个文件，所以 build\oledfonttool.exe 在资源管理器的「详细信息」里
+ * 一片空白：产品名、描述、版本号全是空的，任务管理器里也只显示文件名。
+ * 拿给别人时看不出这是什么程序、是哪个版本，反馈问题时也没法确认版本。
+ *
+ * 中文要显式声明 UTF-8，否则 rc.exe 按系统 ANSI(GBK) 读这个文件，
+ * 「点阵」这类字会变成乱码写进 exe 属性。
+ */
+#pragma code_page(65001)
+
+#include <windows.h>
+
+/* 最小 ID 的图标就是 exe 的默认图标（资源管理器、任务栏、快捷方式都用它） */
+1 ICON "app.ico"
+
+/* 版本号要和 installer\oledfonttool.iss 里的 MyAppVersion 保持一致 */
+VS_VERSION_INFO VERSIONINFO
+FILEVERSION     1,2,0,0
+PRODUCTVERSION  1,2,0,0
+FILEFLAGSMASK   0x3fL
+#ifdef _DEBUG
+FILEFLAGS       0x1L
+#else
+FILEFLAGS       0x0L
+#endif
+FILEOS          0x40004L
+FILETYPE        0x1L
+FILESUBTYPE     0x0L
+BEGIN
+    BLOCK "StringFileInfo"
+    BEGIN
+        /* 080404b0 = 中文(简体, 0x0804) + Unicode(0x04b0) */
+        BLOCK "080404b0"
+        BEGIN
+            VALUE "CompanyName",      "zhangruodong"
+            VALUE "FileDescription",  "OLED 点阵取模工具"
+            VALUE "FileVersion",      "1.2"
+            VALUE "InternalName",     "oledmatrix"
+            VALUE "LegalCopyright",   "Copyright (C) 2026 zhangruodong"
+            VALUE "OriginalFilename", "oledmatrix.exe"
+            VALUE "ProductName",      "OLED 点阵取模工具"
+            VALUE "ProductVersion",   "1.2"
+        END
+    END
+    BLOCK "VarFileInfo"
+    BEGIN
+        VALUE "Translation", 0x804, 1200
+    END
+END

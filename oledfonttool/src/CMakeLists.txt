@@ -6,7 +6,12 @@ if(CMAKE_VERSION VERSION_GREATER_EQUAL 3.27)
     set(CMAKE_POLICY_VERSION_MINIMUM 3.5)
 endif()
 
-project(oledfonttool LANGUAGES CXX)
+project(oledmatrix LANGUAGES CXX)
+
+# app.rc 要由 rc.exe 编译，得显式启用 RC 语言；project() 只启用了 CXX。
+if(WIN32)
+    enable_language(RC)
+endif()
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -19,7 +24,7 @@ endif()
 
 find_package(Qt6 REQUIRED COMPONENTS Widgets)
 
-qt_add_executable(oledfonttool
+qt_add_executable(oledmatrix
     main.cpp
     fontgen.cpp
     fontpreview.cpp
@@ -29,12 +34,17 @@ qt_add_executable(oledfonttool
     mergeproject.cpp
     screenprobe.cpp
     selftest.cpp
+    app.rc          # 图标 + 版本信息（exe 属性里才有名字和版本号）
 )
 
-target_link_libraries(oledfonttool PRIVATE Qt6::Widgets)
+# app.rc 通过 ICON 语句引用这个文件，CMake 看不到这层依赖，单独列一下
+set_source_files_properties(app.ico PROPERTIES HEADER_FILE_ONLY TRUE)
+target_sources(oledmatrix PRIVATE app.ico)
+
+target_link_libraries(oledmatrix PRIVATE Qt6::Widgets)
 
 # Windows 下不弹控制台窗口
-set_target_properties(oledfonttool PROPERTIES
+set_target_properties(oledmatrix PROPERTIES
     WIN32_EXECUTABLE ON
     MACOSX_BUNDLE OFF
 )

@@ -1401,3 +1401,73 @@ ok  去重 + 带前缀：和拆分前逐字节一致
 - 全量 **204 项**：probe 9 / chip 33 / emit 145 / merge 17。
 - 界面验证只到「图片页渲染正常、三个导出按钮都在」：保存对话框是 IFileDialog，
   默认文件名和目录这一层仍然没法脚本化（见上一节），导出对话框那几步要人工点。
+
+## 改名：OLED 汉字取模工具 → OLED 点阵取模工具
+
+名字是工具刚做出来时起的，那时只有汉字字库一件事。现在同一套导出格式下还有
+图片/动画取模、多素材打包、芯片容量检测、合并进 Keil 工程，标题栏里写着
+「汉字取模」会让人以为图片页是别的程序。
+
+### 一次改到位的地方
+
+| 位置 | 原来 | 现在 |
+|---|---|---|
+| 窗口标题 | OLED 汉字取模工具 | OLED 点阵取模工具 |
+| 侧栏大标题 | 同上 | 同上 |
+| 应用名（QSettings 路径） | 同上 | 同上 |
+| exe 文件名 | `oledfonttool.exe` | `oledmatrix.exe` |
+| CMake target / project | `oledfonttool` | `oledmatrix` |
+| 构建横幅、使用说明标题 | OLED 汉字取模工具 | OLED 点阵取模工具 |
+| 安装包输出名 | `oledfonttool-1.2-setup.exe` | `oledmatrix-1.2-setup.exe` |
+
+**目录名没动**：`oledfonttool\` 这个文件夹名、仓库名 `stm32-oled-font-tool` 都保持原样。
+改目录名会牵动 README 里几十处路径、`BUILD.lnk` 快捷方式、两个远端的 clone 习惯，
+换不来任何好处 —— 用户看到的是 exe 和标题栏，不是文件夹名。
+
+**QSettings 的键跟着变了**：`HKCU\Software\OLEDFontTool\<应用名>`，应用名一改，
+「上次导出目录」「工程目录」就读不到了。没有做旧键迁移：这个键在本机从来没成功
+写进去过（见前面 QSettings 那一节），迁移代码只会是永远走不到的死分支。
+组织名 `OLEDFontTool` 保持不变 —— 它是作者/厂商标识，不是软件名。
+
+### 顺带补上的：exe 之前没有任何资源
+
+改名前 `build\oledfonttool.exe` 在资源管理器「详细信息」里**一片空白**：
+产品名、描述、版本号全空，任务管理器里也只显示文件名。拿给别人时看不出这是什么
+程序、是哪个版本，反馈问题时都没法确认版本。
+
+根因是源码里根本没有 `.rc` 文件 —— 安装包用的 `installer\app.ico` 只进了安装程序，
+没进 exe 本身。现在加了 `src/app.rc`：
+
+- `1 ICON "app.ico"` —— 最小 ID 的图标就是 exe 的默认图标（资源管理器、任务栏、快捷方式都用它）
+- `VS_VERSION_INFO` —— 产品名 / 描述 / 版本 1.2 / 版权 / 原始文件名
+- 首行 `#pragma code_page(65001)` —— 不加的话 rc.exe 按系统 ANSI(GBK) 读这个文件，
+  「点阵」这类字会变成乱码写进 exe 属性
+
+实测 `VersionInfo`：`FileDescription = OLED 点阵取模工具`、`ProductName` 同上、
+`FileVersion = 1.2`，中文没有乱码；`ExtractAssociatedIcon` 取出来的就是那个点阵「字」
+图标。exe 从 551936 变成 563200 字节，多出来的就是图标和版本资源。
+
+CMake 那边要 `enable_language(RC)`：`project(... LANGUAGES CXX)` 只启用了 CXX，
+不启用 RC 的话 `app.rc` 会被当成源文件送给 cl.exe 而报错。
+
+### rc.exe 从「顺便用用」变成硬依赖
+
+以前 `.rc` 只有 CMake 自动生成 manifest 那一步会用，缺了常常也能编过去。
+现在 `app.rc` 是源码的一部分，没有 rc.exe 整个构建直接失败。
+
+`build.ps1` 原来就有 rc.exe 检查，但提示词一律指向「SDK 没装好」。这次遇到另一种
+成因：**reg.exe 被安全策略拦**，`vcvars64.bat` 查不到 SDK 的 bin 路径，
+cl.exe 照样能找到、rc.exe 找不到。于是加了一段兜底：rc.exe 不在 PATH 时，
+直接扫 `C:/Program Files (x86)\Windows Kits\10\bin\*\x64\rc.exe`，取版本号最大的
+那个把目录塞进 PATH —— 全走文件系统，不碰 reg.exe。真实机器上通常走不到这段。
+
+### 验证
+
+- 编译：`ninja` 13 个目标全过，产物 `build\oledmatrix.exe`。
+- 回归测试 **204 项全过**（probe 9 / chip 33 / emit 145 / merge 17）——
+  改名没有碰任何导出逻辑。
+- 界面：启动后标题栏和侧栏大标题都显示「OLED 点阵取模工具」，其余布局无变化。
+- 图标 / 版本信息：见上。
+- `build.ps1` **只做了语法校验**（`Parser::ParseFile` 无错），没有完整跑通：
+  这个环境里 reg.exe 被安全策略拦，vcvars 那一步就过不去。
+  所以 `package\` 是手动更新的（拷新 exe、删旧 exe、按脚本里同一份文案重写使用说明）。

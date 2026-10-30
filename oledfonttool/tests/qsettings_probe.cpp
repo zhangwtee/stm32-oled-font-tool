@@ -8,7 +8,7 @@
 int main(int argc, char *argv[])
 {
 	QCoreApplication app(argc, argv);
-	app.setApplicationName(QStringLiteral("OLED 汉字取模工具"));
+	app.setApplicationName(QStringLiteral("OLED 点阵取模工具"));
 
 	qDebug() << "org     :" << QCoreApplication::organizationName();
 	qDebug() << "app     :" << QCoreApplication::applicationName();

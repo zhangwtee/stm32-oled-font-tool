@@ -1,19 +1,19 @@
 ; ============================================================================
-;  OLED 汉字取模工具 —— Inno Setup 安装脚本
+;  OLED 点阵取模工具 —— Inno Setup 安装脚本
 ;
 ;  编译方式（在命令行里）：
 ;      "C:\Users\74406\AppData\Local\Programs\Inno Setup 6\ISCC.exe" oledfonttool.iss
 ;
-;  产出：Output\oledfonttool-1.0-setup.exe
+;  产出：Output\oledmatrix-<版本>-setup.exe
 ;
 ;  源文件取自 package\ 目录（由 oledfonttool\scripts\build.ps1 的 [6/6] 步骤生成）。
 ; ============================================================================
 
-#define MyAppName        "OLED 汉字取模工具"
+#define MyAppName        "OLED 点阵取模工具"
 #define MyAppVersion     "1.2"
 #define MyAppPublisher   "zhangruodong"
 #define MyAppURL         "https://github.com/zhangruodong/stm32-oled-font-tool"
-#define MyAppExeName     "oledfonttool.exe"
+#define MyAppExeName     "oledmatrix.exe"
 
 ; package 目录的位置（相对本 .iss 文件）
 #define SrcDir           "..\package"
@@ -37,7 +37,7 @@ AllowNoIcons=yes
 
 ; 输出
 OutputDir=Output
-OutputBaseFilename=oledfonttool-{#MyAppVersion}-setup
+OutputBaseFilename=oledmatrix-{#MyAppVersion}-setup
 Compression=lzma2/max
 SolidCompression=yes
 WizardStyle=modern

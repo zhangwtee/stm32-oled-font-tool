@@ -63,7 +63,7 @@
 #endif
 
 /*
- * OLED 汉字取模工具
+ * OLED 点阵取模工具
  *
  * 关键约束：生成的字模必须和工程里 Hardware/OLED.c 的
  * OLED_ShowChinese() 对得上（列行式 / 逆向 / 低位在前 / 每字按页排列）。
@@ -810,7 +810,7 @@ MainWindow::MainWindow()
 
 void MainWindow::buildUi()
 {
-	setWindowTitle(QStringLiteral("OLED 汉字取模工具"));
+	setWindowTitle(QStringLiteral("OLED 点阵取模工具"));
 
 	/* 890 是 1080p 上刚好不出现滚动条的高度，但副屏常常只有 900 高：
 	 * 客户区 890 + 标题栏约 31 = 921，底边会被屏幕切掉，最下面那个按钮点不到。
@@ -833,7 +833,7 @@ void MainWindow::buildUi()
 	sideLayout->setContentsMargins(16, 16, 16, 12);
 	sideLayout->setSpacing(10);
 
-	QLabel *title = new QLabel(QStringLiteral("OLED 汉字取模工具"), side);
+	QLabel *title = new QLabel(QStringLiteral("OLED 点阵取模工具"), side);
 	title->setObjectName(QStringLiteral("Title"));
 	QLabel *subTitle = new QLabel(QStringLiteral("阴码 · 列行式 · 低位在前 · 字号可选"), side);
 	subTitle->setObjectName(QStringLiteral("SubTitle"));
@@ -3822,7 +3822,12 @@ int main(int argc, char *argv[])
 	 * 只是值存不进去。实测确认：没有这一行时 status=1(AccessError)、
 	 * 写进去读不回来；加上之后 status=0、读写正常。 */
 	app.setOrganizationName(QStringLiteral("OLEDFontTool"));
-	app.setApplicationName(QStringLiteral("OLED 汉字取模工具"));
+
+	/* 应用名从「OLED 汉字取模工具」改成「OLED 点阵取模工具」，
+	 * 存储路径 ...\OLEDFontTool\<应用名> 跟着变，旧键里的「上次导出目录」
+	 * 「工程目录」读不到了。不做旧键迁移：这个键在本机从来没写进去过
+	 * （见上），迁移代码只会是永远走不到的死分支。 */
+	app.setApplicationName(QStringLiteral("OLED 点阵取模工具"));
 
 	/* 强制用 Fusion 风格 + 浅色调色板。
 	 *

@@ -1,7 +1,14 @@
-# OLED 汉字取模工具
+# OLED 点阵取模工具
 
-给 STM32 + SSD1306 工程配套的汉字取模工具。**输入文字 → 实时看点阵 → 导出
-`OLED_CFont.h`**，一个字一个字地手攒字模这件事就不必再做了。
+给 STM32 + SSD1306 工程配套的点阵取模工具，两条产线共用同一套导出格式：
+
+- **汉字**：输入文字 → 实时看点阵 → 导出 `OLED_CFont.h`，
+  一个字一个字地手攒字模这件事就不必再做了
+- **图片 / 动画**：一张图或一个 GIF → 二值化成 128×64 点阵 → 导出成 C 数组，
+  可以几份素材并存，也可以拼成一段动画
+
+另外会读工程里的 Keil / CubeIDE 配置（`.uvprojx` / `.ld`），
+算出 Flash 够不够放这些点阵。
 
 有两种用法，产出格式完全一致，按需要选：
 
@@ -26,7 +33,7 @@
 oledfonttool\
   README.md              <- 本文件
   BUILD.lnk              <- 双击构建的快捷方式（本机专用，不提交进仓库）
-  build\                 <- 构建产物：oledfonttool.exe + Qt 运行库
+  build\                 <- 构建产物：oledmatrix.exe + Qt 运行库
   tests\                 <- 回归测试（不参与主构建，单独 cmake 配置）
     fixture\               各种写法的驱动样例（验屏控制器判断）+ move.gif（多帧 GIF）
                            + logo.h / move.h（两份带前缀的素材头文件，验同时 include）
@@ -82,7 +89,7 @@ oledfonttool\
 脚本会自动探测这些工具装在哪，并把结果打印在开头。探测不到时才需要改
 `scripts\build.ps1` 开头的 `$Fallback*` 变量。
 
-产出 `build\oledfonttool.exe`，双击运行。Qt 运行库会自动拷到旁边。
+产出 `build\oledmatrix.exe`，双击运行。Qt 运行库会自动拷到旁边。
 
 真正的构建逻辑在 `scripts\build.ps1`：失败时会停在窗口里，打印日志最后 40 行，
 完整日志写到 `build-log.txt`。
