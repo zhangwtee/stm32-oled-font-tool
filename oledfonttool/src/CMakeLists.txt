@@ -23,6 +23,12 @@ qt_add_executable(oledfonttool
     main.cpp
     fontgen.cpp
     fontpreview.cpp
+    imagegen.cpp
+    imagepreview.cpp
+    chipinfo.cpp
+    mergeproject.cpp
+    screenprobe.cpp
+    selftest.cpp
 )
 
 target_link_libraries(oledfonttool PRIVATE Qt6::Widgets)

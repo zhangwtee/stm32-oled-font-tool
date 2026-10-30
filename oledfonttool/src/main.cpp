@@ -4,7 +4,9 @@
 #include <QComboBox>
 #include <QCoreApplication>
 #include <QDateTime>
+#include <QDialog>
 #include <QDir>
+#include <QDirIterator>
 #include <QFile>
 #include <QFileDialog>
 #include <QFileInfo>
@@ -12,27 +14,45 @@
 #include <QFontDatabase>
 #include <QFontInfo>
 #include <QFormLayout>
+#include <QFrame>
 #include <QGroupBox>
 #include <QHBoxLayout>
+#include <QImageReader>
 #include <QLabel>
+#include <QLineEdit>
+#include <QListWidget>
 #include <QMainWindow>
 #include <QMessageBox>
 #include <QPlainTextEdit>
 #include <QPushButton>
+#include <QPixmap>
 #include <QRegularExpression>
 #include <QScrollArea>
 #include <QSet>
+#include <QSettings>
 #include <QSizePolicy>
 #include <QSlider>
+#include <QSpinBox>
+#include <QSignalBlocker>
+#include <QScreen>
 #include <QSplitter>
 #include <QStandardPaths>
 #include <QStatusBar>
 #include <QStringConverter>
+#include <QTabWidget>
+#include <QTextCursor>
 #include <QTextStream>
+#include <QTimer>
 #include <QVBoxLayout>
 
 #include "fontgen.h"
 #include "fontpreview.h"
+#include "imagegen.h"
+#include "imagepreview.h"
+#include "chipinfo.h"
+#include "mergeproject.h"
+#include "screenprobe.h"
+#include "selftest.h"
 
 /* 诊断用：读进程令牌，判断是否被 AppContainer / 低完整性限制 */
 #ifdef Q_OS_WIN
@@ -44,7 +64,8 @@
  * OLED 汉字取模工具
  *
  * 关键约束：生成的字模必须和工程里 Hardware/OLED.c 的
- * OLED_ShowChinese() 对得上（列行式 / 逆向 / 低位在前 / 每字 32 字节）。
+ * OLED_ShowChinese() 对得上（列行式 / 逆向 / 低位在前 / 每字按页排列）。
+ * 每字字节数随字号变：16×16 = 32，24×24 = 72，32×32 = 128。
  * 编码逻辑在 fontgen.cpp，那份算法和 gen_oled_hz.py 是等价的，
  * 改任何一边都要同步改另一边，否则字会花屏。
  */
@@ -83,48 +104,402 @@ static QString findSrcDir()
  *   这种失败没有任何报错，最难查。所以这里主动检查并提醒。
  */
 
-/* 找工程的根目录（即 MyFreeRTOS_C8T6 本身）。
- *
- * 字库的目标路径是 <工程根>\Hardware\OLED_CFont.h，
- * 所以从 Hardware 往上【一级】就是工程根。
- *
- * 这里曾经写错过两次，都是"层数算错"：
- *   1) 从 Hardware 往上跳两级 → 跳到了工作区，User\ / Hardware\ 全部找不到，
- *      检查静默失效（界面上只显示"没找到"）
- *   2) 兜底分支找到"包含 MyFreeRTOS_C8T6 的那一层"后返回了那一层本身，
- *      同样少拼了一个目录名
- * 判断依据统一成"这一层底下有没有 User 子目录"，比数层数可靠。 */
-static QString findProjectRoot(const QString &headerPath)
+/* 扫描时要跳过的目录：构建产物、IDE 缓存、包管理器目录。
+ * 扫这些既慢又没有意义，而且 build/ 下常常有同名副本，容易认错。 */
+static const QStringList &heavyDirs()
 {
-	if (!headerPath.isEmpty())
+	static const QStringList kSkip = {
+		QStringLiteral("build"),        QStringLiteral("package"),
+		QStringLiteral("Output"),       QStringLiteral("Objects"),
+		QStringLiteral("Listings"),     QStringLiteral("DebugConfig"),
+		QStringLiteral(".git"),         QStringLiteral(".vs"),
+		QStringLiteral("node_modules"), QStringLiteral("__pycache__"),
+		QStringLiteral("tmp"),          QStringLiteral("staging"),
+		QStringLiteral("RTE"),          QStringLiteral(".settings")
+	};
+	return kSkip;
+}
+
+/* path 是否落在 excl 这棵树里（含自身） */
+static bool isUnder(const QString &path, const QString &excl)
+{
+	if (excl.isEmpty())
 	{
-		QDir d(QFileInfo(headerPath).absolutePath());      // ...\MyFreeRTOS_C8T6\Hardware
-		if (d.cdUp())                                      // -> ...\MyFreeRTOS_C8T6
-		{
-			if (QDir(d.absoluteFilePath(QStringLiteral("User"))).exists())
-			{
-				return d.absolutePath();
-			}
-		}
+		return false;
+	}
+	const QString here = QDir::cleanPath(path);
+	const QString root = QDir::cleanPath(excl);
+	return here.compare(root, Qt::CaseInsensitive) == 0 ||
+	       here.startsWith(root + QLatin1Char('/'), Qt::CaseInsensitive);
+}
+
+/*
+ * 在 base 目录下（含自身）递归找某个文件名，最多找 maxDepth 层。
+ * 找到就返回它所在的目录。
+ *
+ * excludePrefix 用来排除一整棵子树 —— 主要是把工具自己的目录排掉，
+ * 否则会先找到 oledfonttool\src\OLED_CFont.h（工具自带的那份），
+ * 而不是用户工程里的。
+ */
+static QString findFileUnder(const QString &base, const QString &fileName, int maxDepth,
+                             const QString &excludePrefix = QString())
+{
+	if (maxDepth < 0)
+	{
+		return QString();
+	}
+	QDir d(base);
+	if (!d.exists() || isUnder(d.absolutePath(), excludePrefix))
+	{
+		return QString();
 	}
 
-	/* 兜底：从 exe 往上找，哪一层下面的 MyFreeRTOS_C8T6 里带 User 子目录。
-	 * 注意要再拼上目录名，不能直接返回"包含它的那一层"。 */
-	QDir dir(QCoreApplication::applicationDirPath());
-	for (int up = 0; up <= 5; ++up)
+	if (QFile::exists(d.absoluteFilePath(fileName)))
 	{
-		const QString candidate = dir.absoluteFilePath(QStringLiteral("MyFreeRTOS_C8T6"));
-		if (QDir(candidate).exists() &&
-		    QDir(QDir(candidate).absoluteFilePath(QStringLiteral("User"))).exists())
+		return d.absolutePath();
+	}
+
+	const QFileInfoList subs =
+		d.entryInfoList(QDir::Dirs | QDir::NoDotAndDotDot, QDir::Name);
+	for (const QFileInfo &fi : subs)
+	{
+		if (heavyDirs().contains(fi.fileName(), Qt::CaseInsensitive))
 		{
-			return candidate;
+			continue;
 		}
-		if (!dir.cdUp())
+		const QString hit = findFileUnder(fi.absoluteFilePath(), fileName,
+		                                  maxDepth - 1, excludePrefix);
+		if (!hit.isEmpty())
 		{
-			break;
+			return hit;
 		}
 	}
 	return QString();
+}
+
+/* 从字库路径反推工程根目录：字库在 <工程>\Hardware\ 下，往上一级就是工程根。
+ * 不依赖工程叫什么名字。 */
+static QString findProjectRoot(const QString &headerPath)
+{
+	if (headerPath.isEmpty())
+	{
+		return QString();
+	}
+	QDir d(QFileInfo(headerPath).absolutePath());   // ...\Hardware
+	if (d.cdUp())                                  // ...\<工程>
+	{
+		return d.absolutePath();
+	}
+	return QString();
+}
+
+/* ============================================================================
+ * 定位用户工程 —— 靠"工程文件"，不靠驱动文件名
+ *
+ * 为什么换：
+ *   最早写死目录名 MyFreeRTOS_C8T6，改名就失效；
+ *   后来改成找 Hardware\OLED.c，可用的是"驱动文件叫 OLED.c"这个巧合，
+ *   别人的驱动叫 lcd.c / ssd1306.c / Display.c / my_screen.c，一样认不出。
+ *   把这种"借用户的命名习惯"当判据，换个工程就崩，跟写死本质是一回事。
+ *
+ * 真正的判据是工程文件本身：
+ *   .uvprojx / .uvproj / .ewp / .cproject / platformio.ini / .mxproject
+ *   这些东西是"这是一个工程"的定义，跟源码文件怎么起名完全无关。
+ *
+ * 找到工程根之后，字库放哪一层？
+ *   字库是纯数据头文件，只要所在目录在 include path 里就能用，
+ *   所以不需要精确识别"驱动在哪个文件"，只要挑个用户装惯的地方：
+ *   已有字库的目录 → 常见源码目录名 → 工程根。
+ * ==========================================================================*/
+
+/* 各 IDE 用来标记"这里是工程"的文件。带 * 的通配。 */
+static QStringList projectMarkers()
+{
+	return QStringList {
+		QStringLiteral("*.uvprojx"),       /* Keil MDK 5 */
+		QStringLiteral("*.uvproj"),        /* Keil MDK 4 */
+		QStringLiteral("*.ewp"),           /* IAR EWARM */
+		QStringLiteral(".cproject"),       /* STM32CubeIDE / Eclipse CDT */
+		QStringLiteral(".mxproject"),      /* STM32CubeMX 生成 */
+		QStringLiteral("platformio.ini")   /* PlatformIO */
+	};
+}
+
+/*
+ * 在 base 下（含自身）按层找工程文件，返回同一层里的【所有】工程根。
+ *
+ * 为什么返回列表而不是一个：
+ *   一个父目录下常常并排放着好几个工程 —— 比如 D:\STM32\ 下面就有
+ *   LED闪烁实验、MyFreeRTOS_C8T6c、MyFreeRTOS_ZET6k…… 只取第一个
+ *   等于按字母序瞎猜，猜错了用户还不知道为什么。
+ *   收集起来才能挑，也才能老实告诉用户"这一层还有别的工程"。
+ *
+ * 只收同一层：浅层的工程比深层更可能是当前在用的，
+ * 而且一旦某层命中就不再往里钻（工程根内部不会再有工程根）。
+ *
+ * maxDirs 是硬上限：从盘根开始找时，几十万目录会卡死，到上限就放弃。
+ */
+static QStringList findProjectRootsUnder(const QString &base, int maxDepth,
+                                         const QString &excludePrefix = QString(),
+                                         int maxCount = 12)
+{
+	QStringList result;
+	if (base.isEmpty() || maxDepth < 0)
+	{
+		return result;
+	}
+
+	const QStringList patterns = projectMarkers();
+	QStringList level { base };
+	int visited = 0;
+	const int kMaxDirs = 1500;
+
+	for (int depth = 0; depth <= maxDepth && !level.isEmpty(); ++depth)
+	{
+		QStringList next;
+		QStringList hits;
+
+		for (const QString &p : level)
+		{
+			if (++visited > kMaxDirs)
+			{
+				break;
+			}
+			if (isUnder(p, excludePrefix))
+			{
+				continue;
+			}
+			const QDir d(p);
+			if (!d.exists())
+			{
+				continue;
+			}
+
+			/* 这一层有工程文件 → 命中。
+			 * 必须带 QDir::Hidden：.cproject / .mxproject 是点开头的隐藏文件，
+			 * 不带这个参数 entryList 根本列不出来。 */
+			if (!d.entryList(patterns, QDir::Files | QDir::Hidden).isEmpty())
+			{
+				hits << QDir::cleanPath(d.absolutePath());
+				if (hits.size() >= maxCount)
+				{
+					return hits;
+				}
+				continue;       /* 已是工程根，不必再往里找 */
+			}
+
+			const QFileInfoList subs = d.entryInfoList(
+				QDir::Dirs | QDir::NoDotAndDotDot | QDir::Hidden, QDir::Name);
+			for (const QFileInfo &fi : subs)
+			{
+				if (!heavyDirs().contains(fi.fileName(), Qt::CaseInsensitive))
+				{
+					next << fi.absoluteFilePath();
+				}
+			}
+		}
+
+		if (!hits.isEmpty())
+		{
+			return hits;        /* 这一层有就到此为止，不往深了收 */
+		}
+		level = next;
+	}
+	return result;
+}
+
+/*
+ * 多个候选里挑一个默认值。规则从强到弱：
+ *   1. 里面已经有 OLED_CFont.h 的 —— 之前就在这个工程里导出过
+ *   2. 目录修改时间最新的 —— 最近在动的那个通常就是正在做的
+ *   3. 第一个（按名字序，保证结果稳定可复现）
+ *
+ * 这只是"默认值"。UI 会把"这一层还有几个别的工程"写出来，
+ * 用户一看不对就能一键换 —— 暗中选择又不提示，才是真的坑。
+ */
+static QString pickBestProject(const QStringList &roots)
+{
+	if (roots.isEmpty())
+	{
+		return QString();
+	}
+	if (roots.size() == 1)
+	{
+		return roots.first();
+	}
+
+	for (const QString &r : roots)
+	{
+		if (!findFileUnder(r, QStringLiteral("OLED_CFont.h"), 2).isEmpty())
+		{
+			return r;
+		}
+	}
+
+	QString best = roots.first();
+	QDateTime bestTime = QFileInfo(best).lastModified();
+	for (int i = 1; i < roots.size(); ++i)
+	{
+		const QDateTime t = QFileInfo(roots.at(i)).lastModified();
+		if (t > bestTime)
+		{
+			best = roots.at(i);
+			bestTime = t;
+		}
+	}
+	return best;
+}
+
+/*
+ * 工程根定了，字库写哪层。
+ *
+ * strongOnly = true ：只认"已有字库"和"常见源码目录名"，都不中就返回空，
+ *                     交给调用方换一个候选根再试。这样"上一层才是真工程根"
+ *                     的情况（.uvprojx 放在 MDK-ARM\ 里）能自动纠正。
+ * strongOnly = false：都找不到就退回工程根本身。
+ */
+static QString pickFontDirIn(const QString &projRoot, bool strongOnly,
+                             const QString &excludePrefix = QString())
+{
+	if (projRoot.isEmpty())
+	{
+		return QString();
+	}
+	const QDir root(projRoot);
+	if (!root.exists())
+	{
+		return QString();
+	}
+
+	/* 1) 工程里已经有字库 → 原地更新。
+	 *    绝不能换个目录再写一份，否则工程里两个 OLED_CFont.h，谁生效看运气。 */
+	{
+		const QString hit = findFileUnder(projRoot, QStringLiteral("OLED_CFont.h"), 3, excludePrefix);
+		if (!hit.isEmpty())
+		{
+			return hit;
+		}
+	}
+
+	/* 2) 常见放法，按顺序取第一个存在的 */
+	static const QStringList kCommon = {
+		QStringLiteral("Hardware"),   QStringLiteral("User"),
+		QStringLiteral("BSP"),        QStringLiteral("Drivers"),
+		QStringLiteral("App"),        QStringLiteral("Core/Src"),
+		QStringLiteral("Src"),        QStringLiteral("Source"),
+		QStringLiteral("Inc"),        QStringLiteral("Source/Hardware")
+	};
+	for (const QString &rel : kCommon)
+	{
+		const QDir d(root.absoluteFilePath(rel));
+		if (d.exists())
+		{
+			return QDir::cleanPath(d.absolutePath());
+		}
+	}
+
+	if (strongOnly)
+	{
+		return QString();
+	}
+
+	/* 3) 都不像 → 工程根。位置不理想，但至少落在工程里，用户自己搬一步就行 */
+	return QDir::cleanPath(root.absolutePath());
+}
+
+/*
+ * 从"含工程文件的那一层"推出最终写字库的目录。
+ *
+ * 同一层先试，不中再试上一层 —— 因为 .uvprojx 经常被放在 MDK-ARM\、
+ * EWARM\、Project\ 这类子目录里，真工程根在上一层。
+ */
+/*
+ * 把长路径截成「…\末两级」，只用于面板里的那行提示。
+ *
+ * 完整路径往往有 40~60 个字符（D:\STM32\MyFreeRTOS_C8T6c\Hardware\OLED_CFont.h），
+ * 面板宽度只有 300 出头，一行放不下就得折成两行，白吃 20 像素高度。
+ * 真正需要全文的场景（复制、核对）交给 tooltip。
+ */
+static QString tailPath(const QString &full, int keep = 2)
+{
+	const QString clean = QDir::toNativeSeparators(QDir::cleanPath(full));
+	const QStringList parts = clean.split(QLatin1Char('\\'), Qt::SkipEmptyParts);
+	if (parts.size() <= keep)
+	{
+		return clean;
+	}
+	return QStringLiteral("…\\") + parts.mid(parts.size() - keep).join(QLatin1Char('\\'));
+}
+
+static QString resolveFontDir(const QString &markerDir, const QString &excludePrefix = QString())
+{
+	if (markerDir.isEmpty())
+	{
+		return QString();
+	}
+
+	QStringList candidates;
+	candidates << QDir::cleanPath(markerDir);
+	{
+		const QString up = QFileInfo(markerDir).absolutePath();
+		if (!up.isEmpty() && !isUnder(up, excludePrefix))
+		{
+			candidates << QDir::cleanPath(up);
+		}
+	}
+
+	for (const QString &c : candidates)
+	{
+		const QString hit = pickFontDirIn(c, true, excludePrefix);
+		if (!hit.isEmpty())
+		{
+			return hit;
+		}
+	}
+	/* 都没有强命中 → 就在工程文件那一层 */
+	return QDir::cleanPath(markerDir);
+}
+
+/*
+ * 递归收集 .c / .h 文件。用于编码检查。
+ *
+ * 同样不依赖子目录叫什么名字 —— 有些工程叫 User/Hardware，
+ * 有些叫 Core/Src/App，都无所谓。
+ * 但有深度和数量上限，避免扫到巨大的第三方库时卡住。
+ */
+static void collectSourceFiles(const QDir &dir, QStringList &out, int maxDepth, int maxFiles)
+{
+	if (maxDepth < 0 || out.size() >= maxFiles)
+	{
+		return;
+	}
+
+	const QFileInfoList files =
+		dir.entryInfoList(QStringList() << QStringLiteral("*.c") << QStringLiteral("*.h"),
+		                  QDir::Files, QDir::Name);
+	for (const QFileInfo &fi : files)
+	{
+		if (out.size() >= maxFiles)
+		{
+			return;
+		}
+		out << fi.absoluteFilePath();
+	}
+
+	const QFileInfoList subs =
+		dir.entryInfoList(QDir::Dirs | QDir::NoDotAndDotDot, QDir::Name);
+	for (const QFileInfo &fi : subs)
+	{
+		if (heavyDirs().contains(fi.fileName(), Qt::CaseInsensitive))
+		{
+			continue;
+		}
+		collectSourceFiles(QDir(fi.absoluteFilePath()), out, maxDepth - 1, maxFiles);
+		if (out.size() >= maxFiles)
+		{
+			return;
+		}
+	}
 }
 
 /* 检测一个源文件的编码。
@@ -280,10 +655,46 @@ private:
 	void checkSourceEncoding(bool popupOnProblem);
 	void writeEncodingLog(const QStringList &lines) const;
 	QString defaultHeaderPath() const;
+	/* 让用户自己指定工程目录，并重新推算字库落点。
+	 * 自动定位猜不准时用它 —— 手动指过一次就记住，比任何猜测都可靠。 */
+	void chooseProjectDir();
+
+	/* ---- 图片 / 动画模式 ---- */
+	QWidget *buildImagePage();
+	void loadImageFile();
+	void recomputeImage();          /* 重新缩放+单色+打包，并刷新预览 */
+	void exportAnimHeader();
+	void togglePlayback();
+	void updateImageInfo();
+	ImageGen::Options imageOptions() const;
+
+	/* ---- 烧录自检帧 ---- */
+	void showSelfTest();
+
+	/* ---- 一键接入工程 ---- */
+	/* 把「驱动头文件补声明」「main.c 补 include 和示例调用」直接做掉。
+	 * 只插入不改动，写盘前给预览，每个文件留 .oledbak 可撤销。 */
+	void mergeIntoProject();
+
+	/* ---- 屏控制器（决定列偏移） ---- */
+	/* 从工程里的驱动源码读出这屏是 SSD1306 还是 SH1106。
+	 * 三份导出文件（字库 / 动画 / 自检帧）里的 *_COL_OFFSET 都由它决定。 */
+	void reprobeScreen();
+	void updateScreenNote();
+	int  currentColOffset() const;
+	int  currentScreenH() const;
+
+	/* ---- 芯片 Flash 容量 ---- */
+	/* 从工程的 .uvprojx（IROM）或链接脚本读容量，读不到退回型号解码。
+	 * 放启动和换工程时做，状态栏和图片页的占比都靠它。 */
+	void   readChip();
+	void   updateChipNote();
+	qint64 flashCapacity() const;
 
 	FontGen m_gen;
 	QPlainTextEdit *m_text;
 	QComboBox *m_fontBox;
+	QComboBox *m_sizeBox;           /* 点阵字号 16 / 24 / 32 */
 	QLabel *m_fontWarn;
 	QSlider *m_threshold;
 	QLabel *m_thresholdValue;
@@ -293,28 +704,81 @@ private:
 	QLabel *m_countLabel;
 	QLabel *m_hint;
 	QLabel *m_pathLabel;
+	QLabel *m_projWarn;             /* 同一层找到多个工程时的提醒，单行 */
 	QLabel *m_encStatus;            /* 源码编码检查结果 */
 	QCheckBox *m_askEveryTime;      /* 勾上则每次导出都弹对话框选位置 */
 	QString m_headerPath;
+
+	/* 屏控制器探测结果。offset 0 = SSD1306，2 = SH1106（132 列，可见区从第 2 列起） */
+	QComboBox          *m_screenBox;
+	QComboBox          *m_screenHBox;      /* 屏高 64 / 32，写进字库的 CF_SCREEN_H */
+	ScreenProbe::Result m_probe;
+	bool                m_probeDone = false;
+
+	/* 芯片 Flash 容量。以前写死 64KB，打开 512KB 的工程就在说假话。
+	 * m_chip 是自动读到的结果，m_flashBox 让用户能覆盖它（同一个芯片也可以
+	 * 手动把 IROM 改小，这时读到的值仍然对，但用户可能想按更小的算）。 */
+	ChipInfo::Result    m_chip;
+	QComboBox          *m_flashBox;
+	QLabel             *m_flashInfo;
+
+	/* defaultHeaderPath() 是 const 的，但要把"这一层发现的所有工程"带出来
+	 * 给界面提示用（只发现一个的话不必多说）。所以是 mutable。 */
+	mutable QStringList m_projectCandidates;
+
+	/* 图片 / 动画模式的状态 */
+	QString                      m_imgPath;
+	QVector<QImage>              m_imgSource;   /* 从文件读出的原始帧 */
+	QVector<QImage>              m_imgMono;     /* 单色化后的帧（预览用） */
+	QVector<QVector<quint8>>     m_imgPacked;   /* 打包后的显存字节（导出用） */
+	int                          m_imgDelayMs = 100;   /* 帧延时，来自 GIF */
+	ImagePreview                *m_imgPreview;
+	QLabel                      *m_imgFileLabel;
+	QLabel                      *m_imgInfo;
+	QComboBox                   *m_imgSize;
+	QComboBox                   *m_imgScale;
+	QComboBox                   *m_imgStep;     /* 抽帧：每 N 帧取 1 */
+	QSlider                     *m_imgThreshold;
+	QLabel                      *m_imgThresholdValue;
+	QCheckBox                   *m_imgDither;
+	QPushButton                 *m_imgPlayBtn;
+	QTimer                      *m_imgTimer;
 };
 
 MainWindow::MainWindow()
 	: m_gen(QFont(QStringLiteral("SimSun"), 16), 110)
 {
 	buildUi();
+
+	/* buildUi 里 m_headerPath 就定下来了，紧接着读芯片容量：
+	 * refreshPreview → updateStatus 要用它算占比，顺序反了会先显示一遍 64KB 再改。 */
+	readChip();
 	refreshPreview();
+
+	/* 界面搭好了再探屏：探测要读工程里的驱动源码，这时才知道工程在哪。
+	 * 放在后面而不是导出时，是为了让用户一打开就能看见判断结果。 */
+	reprobeScreen();
 }
 
 void MainWindow::buildUi()
 {
 	setWindowTitle(QStringLiteral("OLED 汉字取模工具"));
-	resize(1060, 660);
+
+	/* 890 是 1080p 上刚好不出现滚动条的高度，但副屏常常只有 900 高：
+	 * 客户区 890 + 标题栏约 31 = 921，底边会被屏幕切掉，最下面那个按钮点不到。
+	 * 所以按当前屏的可用工作区收一下高度，放不下的部分交给滚动区。
+	 * 上下限：640 是再小就什么都看不见，890 是"内容本来就够"的上界。 */
+	{
+		const QScreen *scr = QGuiApplication::primaryScreen();
+		const int availH = scr ? scr->availableGeometry().height() : 900;
+		resize(1060, qBound(640, availH - 90, 890));
+	}
 
 	QWidget *side = new QWidget(this);
 	side->setObjectName(QStringLiteral("SidePanel"));
 	/* 不要用 setFixedWidth：固定宽度会让分隔线拖不动。
 	 * 给个最小宽度让内容不挤，剩下的交给 QSplitter —— 用户可以自由拖动。 */
-	side->setMinimumWidth(280);
+	side->setMinimumWidth(320);
 	side->setSizePolicy(QSizePolicy::Preferred, QSizePolicy::Preferred);
 
 	QVBoxLayout *sideLayout = new QVBoxLayout(side);
@@ -323,10 +787,17 @@ void MainWindow::buildUi()
 
 	QLabel *title = new QLabel(QStringLiteral("OLED 汉字取模工具"), side);
 	title->setObjectName(QStringLiteral("Title"));
-	QLabel *subTitle = new QLabel(QStringLiteral("16×16 点阵 · 列行式 · 低位在前"), side);
+	QLabel *subTitle = new QLabel(QStringLiteral("阴码 · 列行式 · 低位在前 · 字号可选"), side);
 	subTitle->setObjectName(QStringLiteral("SubTitle"));
 	sideLayout->addWidget(title);
 	sideLayout->addWidget(subTitle);
+
+	/* 四个分组叠起来比 1080p 还高一点，窗口一缩小最下面的按钮就掉出去了。
+	 * 所以中间这一段放滚动区；编码状态和字数统计固定在底部，不跟着滚。 */
+	QWidget *inner = new QWidget(side);
+	QVBoxLayout *innerLayout = new QVBoxLayout(inner);
+	innerLayout->setContentsMargins(0, 0, 0, 0);
+	innerLayout->setSpacing(10);
 
 	/* ---- 取模设置 ---- */
 	QGroupBox *boxSet = new QGroupBox(QStringLiteral("取模设置"), side);
@@ -355,6 +826,18 @@ void MainWindow::buildUi()
 	}
 	form->addRow(QStringLiteral("字体"), m_fontBox);
 
+	/* 字号。只放 8 的倍数：编码按页走，一页 8 行，24 和 32 都能整除，
+	 * 12x12 那种除不尽，这套格式装不下，所以不提供。 */
+	m_sizeBox = new QComboBox(boxSet);
+	m_sizeBox->addItem(QStringLiteral("16×16  小字（每字 32 字节）"), 16);
+	m_sizeBox->addItem(QStringLiteral("24×24  中字（每字 72 字节）"), 24);
+	m_sizeBox->addItem(QStringLiteral("32×32  大字（每字 128 字节）"), 32);
+	m_sizeBox->setToolTip(QStringLiteral(
+		"点阵越大越清楚，也越占 Flash。\n"
+		"16×16 和原本的驱动完全兼容；换成 24/32 后，\n"
+		"驱动里的数组名和查表步长会自动变化，用导出文件里的宏即可。"));
+	form->addRow(QStringLiteral("字号"), m_sizeBox);
+
 	/* 字体名不存在时 Qt 会静默回退，字形就变了，必须提醒 */
 	m_fontWarn = new QLabel(boxSet);
 	m_fontWarn->setObjectName(QStringLiteral("Warn"));
@@ -374,9 +857,11 @@ void MainWindow::buildUi()
 	m_thresholdValue->setFixedWidth(28);
 	thrLayout->addWidget(m_threshold);
 	thrLayout->addWidget(m_thresholdValue);
-	form->addRow(QStringLiteral("阈值"), thrRow);
+	QLabel *thrLabel = new QLabel(QStringLiteral("阈值"), boxSet);
+	thrLabel->setMinimumWidth(30);        /* 不设的话窄面板里会被滑块压成半截 */
+	form->addRow(thrLabel, thrRow);
 
-	sideLayout->addWidget(boxSet);
+	innerLayout->addWidget(boxSet);
 
 	/* ---- 显示内容 ---- */
 	QGroupBox *boxText = new QGroupBox(QStringLiteral("① 要显示的文字（在这里加字）"), side);
@@ -384,36 +869,108 @@ void MainWindow::buildUi()
 	m_text = new QPlainTextEdit(boxText);
 	m_text->setPlaceholderText(QStringLiteral("直接打字，或点下面的「导入已有字库」"));
 	m_text->setPlainText(QStringLiteral("嵌入式开发网中文测试你好世界温度湿度"));
-	m_text->setFixedHeight(110);
+	m_text->setFixedHeight(88);
 	textLayout->addWidget(m_text);
 
 	/* 字数就地显示在输入框下面，改一个字立刻能看到 */
 	m_countLabel = new QLabel(boxText);
 	m_countLabel->setObjectName(QStringLiteral("Count"));
+	/* 必须能换行，否则这一整行的最小宽度会把滚动区内容撑得比视口还宽，
+	 * 右边一截被切掉（横向滚动条是关的），看起来像字被截断。 */
+	m_countLabel->setWordWrap(true);
+	m_countLabel->setMinimumWidth(1);
 	textLayout->addWidget(m_countLabel);
 
 	m_hint = new QLabel(boxText);
 	m_hint->setObjectName(QStringLiteral("Hint"));
 	m_hint->setWordWrap(true);
-	m_hint->setText(QStringLiteral("· 直接改上面的文字就能加字，右边实时预览\n"
-	                               "· 「导入已有字库」= 读回 OLED_CFont.h，与当前文字合并，不会覆盖\n"
-	                               "· 字母数字走原有 ASCII 字库，不用取模\n"
-	                               "· 字库没有的字会显示成两格空白，不会花屏"));
+	m_hint->setMinimumWidth(1);
+	m_hint->setText(QStringLiteral("· 改文字就加字，右边实时预览\n"
+	                               "· 「导入已有字库」= 读回并合并，不覆盖\n"
+	                               "· 字母数字走 ASCII；缺字显示空白，不花屏"));
 	textLayout->addWidget(m_hint);
-	sideLayout->addWidget(boxText);
+	innerLayout->addWidget(boxText);
 
 	/* ---- 导出 ---- */
 	QGroupBox *boxOut = new QGroupBox(QStringLiteral("导出"), side);
 	QVBoxLayout *outLayout = new QVBoxLayout(boxOut);
 
+	/* 屏控制器决定列偏移：SSD1306 显存 128 列，列地址就从 0 开始；SH1106 显存
+	 * 132 列、可见区从第 2 列开始，每条列地址都要 +2，否则整幅左移 2 像素、
+	 * 右边少两列。这个差别不体现在数据里，只体现在写哪个列地址。
+	 *
+	 * 以前要用户自己翻驱动、再把三份导出文件里的宏各改一遍（漏改一处的表现
+	 * 还各不相同）。现在从驱动源码里读，读不准也能手动指定。 */
+	QHBoxLayout *screenRow = new QHBoxLayout();
+	screenRow->setContentsMargins(0, 0, 0, 0);
+	screenRow->setSpacing(6);
+	QLabel *screenLabel = new QLabel(QStringLiteral("屏"), boxOut);
+	screenLabel->setMinimumWidth(20);
+	m_screenBox = new QComboBox(boxOut);
+	m_screenBox->addItem(QStringLiteral("自动判断"), 0);
+	m_screenBox->addItem(QStringLiteral("SSD1306 · 偏移 0"), 1);
+	m_screenBox->addItem(QStringLiteral("SH1106 · 偏移 2"), 2);
+	m_screenBox->setToolTip(QStringLiteral(
+		"决定导出文件里 CF_COL_OFFSET / ANIM_COL_OFFSET / OLED_SELFTEST_COL_OFFSET 的值。\n"
+		"自动判断：在工程里找驱动源码，看设列地址的地方有没有多加了 2、"
+		"有没有写型号。\n"
+		"判断错了的表现：整幅左移 2 像素、右边框缺两列 —— 手动选另一项即可。"));
+
+	/* 屏高只影响字库：CF_SCREEN_H 决定"第几行还放得下"。
+	 * 128×32 的 0.91" 屏只有 4 页，按 64 算会往不存在的页里写。 */
+	m_screenHBox = new QComboBox(boxOut);
+	m_screenHBox->addItem(QStringLiteral("64 行"), 64);
+	m_screenHBox->addItem(QStringLiteral("32 行"), 32);
+	m_screenHBox->setFixedWidth(70);
+	m_screenHBox->setToolTip(QStringLiteral(
+		"屏的像素高度。0.96\" 是 128×64（64 行），0.91\" 是 128×32（32 行）。\n"
+		"选 32 时导出的字库会把 CF_SCREEN_H 写成 32，"
+		"一行 16×16 最多显示 2 行，24×24 超过 1 行就自动跳过不写。"));
+
+	screenRow->addWidget(screenLabel);
+	screenRow->addWidget(m_screenBox, 1);
+	screenRow->addWidget(m_screenHBox);
+	outLayout->addLayout(screenRow);
+
+	/* 明确停在「自动判断」。updateScreenNote 会改第 0 项的文字，
+	 * 万一哪次改动让它落到别的项上，用户会以为工具擅自选了手动值。 */
+	m_screenBox->setCurrentIndex(0);
+	connect(m_screenBox, &QComboBox::currentIndexChanged, this,
+	        &MainWindow::updateScreenNote);
+
 	m_asciiFont = new QCheckBox(QStringLiteral("统计时包含 ASCII 字库(1520B)"), boxOut);
 	m_asciiFont->setChecked(true);
 	outLayout->addWidget(m_asciiFont);
 
+	/* 路径和「换个目录」并排一行。原来按钮单独占一行，白吃 32 像素，
+	 * 而这个按钮一年也用不上一次 —— 缩成一个小按钮跟在路径后面就够。 */
+	QHBoxLayout *pathRow = new QHBoxLayout();
+	pathRow->setSpacing(6);
 	m_pathLabel = new QLabel(boxOut);
 	m_pathLabel->setObjectName(QStringLiteral("PathLabel"));
-	m_pathLabel->setWordWrap(true);
-	outLayout->addWidget(m_pathLabel);
+	/* 只显示路径末两级，不用换行。完整路径在 tooltip 里。 */
+	m_pathLabel->setWordWrap(false);
+	pathRow->addWidget(m_pathLabel, 1);
+
+	/* 自动定位总有猜不准的时候（工程在别的盘、用了不常见的目录结构）。
+	 * 与其让用户对着"未找到工程"发愁，不如给一个明确的入口自己指一次。 */
+	QPushButton *projBtn = new QPushButton(QStringLiteral("更改"), boxOut);
+	projBtn->setToolTip(QStringLiteral(
+		"工具靠工程文件（.uvprojx / .ewp / .cproject 等）自动找工程。\n"
+		"找不到、或找到了别的工程时，点这里手动指定一次，之后会记住。"));
+	pathRow->addWidget(projBtn);
+	outLayout->addLayout(pathRow);
+	connect(projBtn, &QPushButton::clicked, this, &MainWindow::chooseProjectDir);
+
+	/* 同一层有多个工程时，默认值是挑出来的，必须说出来 ——
+	 * 暗中选择又不提示，用户会发现字库莫名其妙进了别的工程。
+	 * 单独一行、只写结论，名单塞进 tooltip。 */
+	m_projWarn = new QLabel(boxOut);
+	m_projWarn->setObjectName(QStringLiteral("Warn"));
+	m_projWarn->setWordWrap(true);
+	m_projWarn->setMinimumWidth(1);
+	m_projWarn->setVisible(false);
+	outLayout->addWidget(m_projWarn);
 
 	/* 默认不勾：正常情况下一键导出，不打扰。
 	 * 勾上后每次导出都弹对话框，方便导出到别处。 */
@@ -432,17 +989,47 @@ void MainWindow::buildUi()
 	btnRow->addWidget(saveAsBtn);
 	outLayout->addLayout(btnRow);
 
-	sideLayout->addWidget(boxOut);
+	/* 自检帧和字库是两条独立的路：字库验证"这个字对不对"，自检帧验证
+	 * "工具吐出来的字节和你的驱动是不是同一套"。后者是唯一能一眼看穿的验收手段，
+	 * 所以单独给一个入口，不和导出字库混在一起。 */
+	QPushButton *selfTestBtn = new QPushButton(QStringLiteral("烧录自检帧…"), boxOut);
+	selfTestBtn->setToolTip(QStringLiteral(
+		"生成一张整屏图（带显示函数），烧进板子刷一次。\n"
+		"128×64 和 128×32 两种屏都能选。\n"
+		"四边完整、四角各不同、中间有字 = 格式对上了。\n"
+		"这是确认取模结果和驱动匹配最快的办法。"));
+	outLayout->addWidget(selfTestBtn);
+	connect(selfTestBtn, &QPushButton::clicked, this, &MainWindow::showSelfTest);
+
+	/* 导出完字库，用户手里还是"一坨数据"。这一步把它接进工程：
+	 * 驱动头文件补声明、main.c 补 include 和示例。省掉手工改文件的活。 */
+	QPushButton *mergeBtn = new QPushButton(QStringLiteral("一键接入工程…"), boxOut);
+	mergeBtn->setToolTip(QStringLiteral(
+		"自动在驱动头文件里补上写命令/写数据的声明，"
+		"在 main.c 里补 #include 和两行示例调用。\n"
+		"只插入，不改你已有的任何一行；写盘前会给你看改什么，"
+		"每个文件留一份 .oledbak 随时能撤销。"));
+	outLayout->addWidget(mergeBtn);
+	connect(mergeBtn, &QPushButton::clicked, this, &MainWindow::mergeIntoProject);
+
+	innerLayout->addWidget(boxOut);
+	innerLayout->addStretch(1);
+
+	QScrollArea *sideScroll = new QScrollArea(side);
+	sideScroll->setWidget(inner);
+	sideScroll->setWidgetResizable(true);
+	sideScroll->setFrameShape(QFrame::NoFrame);
+	sideScroll->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+	sideLayout->addWidget(sideScroll, 1);
 
 	/* 源码编码检查结果。
-	 * 单独放一个标签，因为它关系到"字库能不能被查到"，比普通状态重要。 */
+	 * 单独放一个标签，因为它关系到"字库能不能被查到"，比普通状态重要。
+	 * 放在滚动区外面：窗口再小也要能一眼看到。 */
 	m_encStatus = new QLabel(side);
 	m_encStatus->setObjectName(QStringLiteral("Hint"));
 	m_encStatus->setWordWrap(true);
 	m_encStatus->setMinimumWidth(1);
 	sideLayout->addWidget(m_encStatus);
-
-	sideLayout->addStretch(1);
 
 	m_status = new QLabel(side);
 	m_status->setObjectName(QStringLiteral("Hint"));
@@ -450,7 +1037,48 @@ void MainWindow::buildUi()
 	 * 不开的话超出面板宽度的部分会被直接切掉，看起来像显示不全。 */
 	m_status->setWordWrap(true);
 	m_status->setMinimumWidth(1);      /* 允许被压缩，配合上面的换行才不会撑开面板 */
-	sideLayout->addWidget(m_status);
+
+	/* 第二行：芯片 + 容量 + 占比。容量可以手动改 ——
+	 * 自动读的是链接器里的 IROM，多数情况不用管；但有人会把 IROM 改小
+	 * （留一半给 bootloader），或者工程文件读不出来，这时就需要能自己选。 */
+	QHBoxLayout *flashRow = new QHBoxLayout();
+	flashRow->setSpacing(6);
+	flashRow->setContentsMargins(0, 0, 0, 0);
+	m_flashInfo = new QLabel(side);
+	m_flashInfo->setObjectName(QStringLiteral("Hint"));
+	m_flashInfo->setWordWrap(true);
+	m_flashInfo->setMinimumWidth(1);
+	flashRow->addWidget(m_flashInfo, 1);
+
+	m_flashBox = new QComboBox(side);
+	m_flashBox->addItem(QStringLiteral("自动"), 0);
+	m_flashBox->addItem(QStringLiteral("32 KB"),   32);
+	m_flashBox->addItem(QStringLiteral("64 KB"),   64);
+	m_flashBox->addItem(QStringLiteral("128 KB"), 128);
+	m_flashBox->addItem(QStringLiteral("256 KB"), 256);
+	m_flashBox->addItem(QStringLiteral("512 KB"), 512);
+	m_flashBox->addItem(QStringLiteral("1 MB"),  1024);
+	m_flashBox->setToolTip(QStringLiteral(
+		"手动指定芯片的 Flash 容量，用来算「字库占多少」。\n"
+		"默认「自动」= 读工程里的 IROM（链接器实际用的 ROM 大小）。"));
+	/* 下拉只显示「自动 / 32 KB / …」，具体读到的容量在左边那行里，
+	 * 这里再写一遍反而被截成「自动 64」。 */
+	m_flashBox->setFixedWidth(76);
+	m_flashBox->setFixedHeight(22);
+	flashRow->addWidget(m_flashBox);
+
+	/* 两行贴在一起：中间按 10px 走的话，底部这一块会比改造前高 8px，
+	 * 面板刚好挤出竖直滚动条（上面几十个像素是省出来的，不能又还回去）。 */
+	QVBoxLayout *statusBox = new QVBoxLayout();
+	statusBox->setContentsMargins(0, 0, 0, 0);
+	statusBox->setSpacing(2);
+	statusBox->addWidget(m_status);
+	statusBox->addLayout(flashRow);
+	sideLayout->addLayout(statusBox);
+	connect(m_flashBox, &QComboBox::currentIndexChanged, this, [this]() {
+		updateStatus();
+		updateImageInfo();          /* 图片页那句「放不下几秒」也跟着变 */
+	});
 
 	/* ---- 右侧预览：套一层滚动区域，字多了 / 窗口缩小了都能滚 ---- */
 	m_preview = new FontPreview(this);
@@ -469,19 +1097,50 @@ void MainWindow::buildUi()
 	splitter->setStretchFactor(0, 0);
 	splitter->setStretchFactor(1, 1);
 	splitter->setChildrenCollapsible(false);
-	splitter->setSizes(QList<int>() << 320 << 740);
-	setCentralWidget(splitter);
+	splitter->setSizes(QList<int>() << 360 << 700);
+
+	/* 两种模式并排放进标签页：文字模式是原来那套界面，一个字都不动；
+	 * 图片/动画模式是独立一页，互不影响。 */
+	QTabWidget *tabs = new QTabWidget(this);
+	tabs->addTab(splitter, QStringLiteral("文字"));
+	tabs->addTab(buildImagePage(), QStringLiteral("图片 / 动画"));
+	setCentralWidget(tabs);
 
 	m_headerPath = defaultHeaderPath();
 	if (m_headerPath.isEmpty())
 	{
-		m_pathLabel->setText(QStringLiteral(
-			"未自动找到 Keil 工程目录。\n"
-			"导出时会先弹出对话框让你选保存位置。"));
+		m_pathLabel->setText(QStringLiteral("未找到工程目录"));
+		m_pathLabel->setToolTip(QStringLiteral(
+			"没在本工具附近找到 .uvprojx / .ewp / .cproject。\n"
+			"导出时会让你选一次工程目录，或点右边「更改」。"));
 	}
 	else
 	{
-		m_pathLabel->setText(QStringLiteral("默认导出到：\n%1").arg(m_headerPath));
+		m_pathLabel->setText(QStringLiteral("导出到：%1").arg(tailPath(m_headerPath, 2)));
+		m_pathLabel->setToolTip(m_headerPath);
+
+		/* 同一层有多个工程时，默认值是挑出来的，必须说出来。
+		 * 暗中选择又不提示 —— 用户会发现字库莫名其妙进了别的工程。 */
+		if (m_projectCandidates.size() > 1 && m_projWarn)
+		{
+			QStringList names;
+			QString used;
+			for (const QString &p : m_projectCandidates)
+			{
+				names << QFileInfo(p).fileName();
+				if (m_headerPath.startsWith(QDir::cleanPath(p) + QLatin1Char('/')))
+				{
+					used = QFileInfo(p).fileName();
+				}
+			}
+			m_projWarn->setText(QStringLiteral("⚠ 同层 %1 个工程，默认 %2")
+			                    .arg(m_projectCandidates.size())
+			                    .arg(used.isEmpty() ? QStringLiteral("一个") : used));
+			m_projWarn->setToolTip(QStringLiteral("这一层找到的工程：%1\n"
+			                                      "要换成别的，点上面的「更改」。")
+			                       .arg(names.join(QStringLiteral("、"))));
+			m_projWarn->setVisible(true);
+		}
 	}
 
 	/* 启动时做一次源码编码检查（不弹窗，只写进状态标签） */
@@ -489,6 +1148,8 @@ void MainWindow::buildUi()
 
 	connect(m_text, &QPlainTextEdit::textChanged, this, &MainWindow::refreshPreview);
 	connect(m_fontBox, QOverload<int>::of(&QComboBox::currentIndexChanged),
+	        this, &MainWindow::refreshPreview);
+	connect(m_sizeBox, QOverload<int>::of(&QComboBox::currentIndexChanged),
 	        this, &MainWindow::refreshPreview);
 	connect(m_threshold, &QSlider::valueChanged, this, [this](int v) {
 		m_thresholdValue->setText(QString::number(v));
@@ -510,59 +1171,1031 @@ void MainWindow::buildUi()
 	});
 }
 
+/* ==========================================================================
+ *  图片 / 动画模式
+ * ========================================================================== */
+
+QWidget *MainWindow::buildImagePage()
+{
+	QWidget *side = new QWidget(this);
+	side->setObjectName(QStringLiteral("SidePanel"));
+	side->setMinimumWidth(300);
+	side->setSizePolicy(QSizePolicy::Preferred, QSizePolicy::Preferred);
+
+	QVBoxLayout *sideLayout = new QVBoxLayout(side);
+	sideLayout->setContentsMargins(16, 16, 16, 12);
+	sideLayout->setSpacing(10);
+
+	QLabel *title = new QLabel(QStringLiteral("图片 / 动画取模"), side);
+	title->setObjectName(QStringLiteral("Title"));
+	sideLayout->addWidget(title);
+
+	QGroupBox *boxFile = new QGroupBox(QStringLiteral("素材"), side);
+	QVBoxLayout *fileLayout = new QVBoxLayout(boxFile);
+
+	QPushButton *openBtn = new QPushButton(QStringLiteral("选择图片或 GIF…"), boxFile);
+	fileLayout->addWidget(openBtn);
+
+	m_imgFileLabel = new QLabel(QStringLiteral("（还没选文件）"), boxFile);
+	m_imgFileLabel->setObjectName(QStringLiteral("PathLabel"));
+	m_imgFileLabel->setWordWrap(true);
+	fileLayout->addWidget(m_imgFileLabel);
+
+	sideLayout->addWidget(boxFile);
+
+	QGroupBox *boxOpt = new QGroupBox(QStringLiteral("取模设置"), side);
+	QFormLayout *form = new QFormLayout(boxOpt);
+
+	m_imgSize = new QComboBox(boxOpt);
+	m_imgSize->addItem(QStringLiteral("128 × 64（0.96\" 全屏）"), QPoint(128, 64));
+	m_imgSize->addItem(QStringLiteral("128 × 32（0.91\" 屏）"),   QPoint(128, 32));
+	m_imgSize->addItem(QStringLiteral("64 × 64"),                 QPoint(64, 64));
+	m_imgSize->addItem(QStringLiteral("32 × 32"),                 QPoint(32, 32));
+	m_imgSize->addItem(QStringLiteral("16 × 16"),                 QPoint(16, 16));
+	form->addRow(QStringLiteral("目标尺寸"), m_imgSize);
+
+	m_imgScale = new QComboBox(boxOpt);
+	m_imgScale->addItem(QStringLiteral("等比缩放 + 留白"), 0);
+	m_imgScale->addItem(QStringLiteral("拉伸填满"),       1);
+	form->addRow(QStringLiteral("缩放方式"), m_imgScale);
+
+	m_imgStep = new QComboBox(boxOpt);
+	m_imgStep->addItem(QStringLiteral("不抽帧"),   1);
+	m_imgStep->addItem(QStringLiteral("每 2 帧取 1"), 2);
+	m_imgStep->addItem(QStringLiteral("每 3 帧取 1"), 3);
+	m_imgStep->addItem(QStringLiteral("每 4 帧取 1"), 4);
+	m_imgStep->addItem(QStringLiteral("每 6 帧取 1"), 6);
+	m_imgStep->addItem(QStringLiteral("每 8 帧取 1"), 8);
+	form->addRow(QStringLiteral("抽帧"), m_imgStep);
+
+	QHBoxLayout *thrRow = new QHBoxLayout();
+	m_imgThreshold = new QSlider(Qt::Horizontal, boxOpt);
+	m_imgThreshold->setRange(0, 255);
+	m_imgThreshold->setValue(128);
+	m_imgThresholdValue = new QLabel(QStringLiteral("128"), boxOpt);
+	m_imgThresholdValue->setMinimumWidth(36);
+	thrRow->addWidget(m_imgThreshold);
+	thrRow->addWidget(m_imgThresholdValue);
+	form->addRow(QStringLiteral("亮度阈值"), thrRow);
+
+	m_imgDither = new QCheckBox(QStringLiteral("抖动（照片/渐变建议开）"), boxOpt);
+	m_imgDither->setChecked(true);
+	form->addRow(QString(), m_imgDither);
+
+	sideLayout->addWidget(boxOpt);
+
+	m_imgInfo = new QLabel(side);
+	m_imgInfo->setObjectName(QStringLiteral("Hint"));
+	m_imgInfo->setWordWrap(true);
+	m_imgInfo->setMinimumWidth(1);
+	sideLayout->addWidget(m_imgInfo);
+
+	sideLayout->addStretch(1);
+
+	QHBoxLayout *btnRow = new QHBoxLayout();
+	m_imgPlayBtn = new QPushButton(QStringLiteral("播放"), side);
+	QPushButton *exportBtn = new QPushButton(QStringLiteral("导出 anim.h"), side);
+	exportBtn->setObjectName(QStringLiteral("Primary"));
+	btnRow->addWidget(m_imgPlayBtn);
+	btnRow->addWidget(exportBtn);
+	sideLayout->addLayout(btnRow);
+
+	/* 右侧预览 */
+	m_imgPreview = new ImagePreview(this);
+	QScrollArea *scroll = new QScrollArea(this);
+	scroll->setWidget(m_imgPreview);
+	scroll->setWidgetResizable(true);
+	scroll->setFrameShape(QFrame::NoFrame);
+	scroll->setMinimumWidth(320);
+
+	QSplitter *splitter = new QSplitter(Qt::Horizontal, this);
+	splitter->addWidget(side);
+	splitter->addWidget(scroll);
+	splitter->setStretchFactor(0, 0);
+	splitter->setStretchFactor(1, 1);
+	splitter->setChildrenCollapsible(false);
+	splitter->setSizes(QList<int>() << 340 << 720);
+
+	m_imgTimer = new QTimer(this);
+	connect(m_imgTimer, &QTimer::timeout, m_imgPreview, &ImagePreview::showNextFrame);
+
+	connect(openBtn, &QPushButton::clicked, this, &MainWindow::loadImageFile);
+	connect(exportBtn, &QPushButton::clicked, this, &MainWindow::exportAnimHeader);
+	connect(m_imgPlayBtn, &QPushButton::clicked, this, &MainWindow::togglePlayback);
+	connect(m_imgSize, QOverload<int>::of(&QComboBox::currentIndexChanged),
+	        this, [this](int) { recomputeImage(); });
+	connect(m_imgScale, QOverload<int>::of(&QComboBox::currentIndexChanged),
+	        this, [this](int) { recomputeImage(); });
+	connect(m_imgStep, QOverload<int>::of(&QComboBox::currentIndexChanged),
+	        this, [this](int) { recomputeImage(); });
+	connect(m_imgDither, &QCheckBox::toggled, this, [this](bool) { recomputeImage(); });
+	connect(m_imgThreshold, &QSlider::valueChanged, this, [this](int v) {
+		m_imgThresholdValue->setText(QString::number(v));
+		recomputeImage();
+	});
+
+	updateImageInfo();
+	return splitter;
+}
+
+ImageGen::Options MainWindow::imageOptions() const
+{
+	ImageGen::Options opt;
+	const QPoint sz = m_imgSize->currentData().toPoint();
+	opt.width     = sz.x();
+	opt.height    = sz.y();
+	opt.stretch   = (m_imgScale->currentData().toInt() == 1);
+	opt.threshold = m_imgThreshold->value();
+	opt.dither    = m_imgDither->isChecked() ? ImageGen::Bayer : ImageGen::NoDither;
+	opt.colOffset = currentColOffset();
+	return opt;
+}
+
+void MainWindow::loadImageFile()
+{
+	const QString path = QFileDialog::getOpenFileName(
+		this, QStringLiteral("选择图片或 GIF"),
+		m_imgPath.isEmpty() ? QString() : QFileInfo(m_imgPath).absolutePath(),
+		QStringLiteral("图片 (*.gif *.png *.jpg *.jpeg *.bmp);;所有文件 (*.*)"));
+	if (path.isEmpty())
+	{
+		return;
+	}
+
+	QImageReader reader(path);
+	reader.setDecideFormatFromContent(true);
+
+	/* GIF 会有多帧；静态图片只有 1 帧。
+	 * 帧数上限设 600 —— 再多既没意义也吃内存。 */
+	QVector<QImage> frames;
+	int firstDelay = 0;
+
+	const int count = reader.imageCount();
+	if (count > 1)
+	{
+		const int limit = qMin(count, 600);
+		for (int i = 0; i < limit; ++i)
+		{
+			const QImage img = reader.read();
+			if (img.isNull())
+			{
+				break;
+			}
+			if (firstDelay <= 0)
+			{
+				const int d = reader.nextImageDelay();
+				if (d > 0)
+				{
+					firstDelay = d;
+				}
+			}
+			frames.append(img);
+		}
+	}
+	else
+	{
+		const QImage img = reader.read();
+		if (!img.isNull())
+		{
+			frames.append(img);
+		}
+	}
+
+	if (frames.isEmpty())
+	{
+		QMessageBox::warning(this, QStringLiteral("打不开"),
+		                     QStringLiteral("这个文件读不出图像：\n%1\n\n%2")
+		                     .arg(path, reader.errorString()));
+		return;
+	}
+
+	m_imgPath   = path;
+	m_imgSource = frames;
+	m_imgDelayMs = (firstDelay > 0) ? firstDelay : 100;
+
+	m_imgFileLabel->setText(QStringLiteral("%1\n（共 %2 帧，原尺寸 %3×%4）")
+	                        .arg(QFileInfo(path).fileName())
+	                        .arg(frames.size())
+	                        .arg(frames.first().width())
+	                        .arg(frames.first().height()));
+
+	recomputeImage();
+}
+
+void MainWindow::recomputeImage()
+{
+	m_imgTimer->stop();
+	m_imgPlayBtn->setText(QStringLiteral("播放"));
+
+	m_imgMono.clear();
+	m_imgPacked.clear();
+
+	if (m_imgSource.isEmpty())
+	{
+		m_imgPreview->clearFrames();
+		updateImageInfo();
+		return;
+	}
+
+	const ImageGen::Options opt = imageOptions();
+	const int step = qMax(1, m_imgStep->currentData().toInt());
+
+	for (int i = 0; i < m_imgSource.size(); i += step)
+	{
+		const QVector<quint8> bytes = ImageGen::convert(m_imgSource.at(i), opt);
+		m_imgPacked.append(bytes);
+		/* 预览用"从显存字节还原出来的图"，保证看到的就是要烧进去的数据 */
+		m_imgMono.append(ImageGen::unpackFromDisplay(bytes, opt.width, opt.height));
+	}
+
+	m_imgPreview->setFrames(m_imgMono, m_imgDelayMs);
+
+	if (m_imgMono.size() > 1)
+	{
+		m_imgTimer->setInterval(qMax(20, m_imgDelayMs));
+	}
+
+	updateImageInfo();
+}
+
+void MainWindow::updateImageInfo()
+{
+	if (m_imgPacked.isEmpty())
+	{
+		const qint64 cap = flashCapacity();
+		QString tip = QStringLiteral("选一张图片或 GIF 开始。");
+		if (cap > 0)
+		{
+			/* 按实际容量和当前选的尺寸举例：512KB 的芯片能放 512 帧，
+			 * 说"放不下几秒"就是在吓人；128×32 一帧也只有 512 字节。 */
+			const QPoint sz = m_imgSize->currentData().toPoint();
+			const int per  = ImageGen::bytesPerFrame(sz.x(), sz.y());
+			const int full = per > 0 ? static_cast<int>(cap / per) : 0;
+			tip += QStringLiteral("\n\n提示：%1×%2 一帧 %3 字节，%4 的芯片最多放 %5 帧。")
+			           .arg(sz.x())
+			           .arg(sz.y())
+			           .arg(per)
+			           .arg(ChipInfo::formatSize(cap))
+			           .arg(full);
+		}
+		m_imgInfo->setText(tip);
+		return;
+	}
+
+	const ImageGen::Options opt = imageOptions();
+	const int frames = m_imgPacked.size();
+	const int per    = ImageGen::bytesPerFrame(opt.width, opt.height);
+	const int total  = per * frames;
+
+	/* 阈值按占芯片容量的比例算，不再用 8KB / 32KB 这种绝对数：
+	 * 同样是 20KB，在 64KB 的芯片上占 31%（要提醒），在 512KB 上只占 3.9%（无所谓）。 */
+	const qint64 cap = flashCapacity();
+	const double pct = (cap > 0) ? (total * 100.0 / cap) : 0.0;
+	QString hint;
+	QString color;
+	if (pct <= 15.0)
+	{
+		color = QStringLiteral("#15803D");     /* 绿 */
+		hint  = QStringLiteral("Flash 占用宽裕");
+	}
+	else if (pct <= 40.0)
+	{
+		color = QStringLiteral("#B45309");     /* 橙 */
+		hint  = QStringLiteral("注意 Flash 占用");
+	}
+	else
+	{
+		color = QStringLiteral("#B91C1C");     /* 红 */
+		hint  = QStringLiteral("占用偏大，建议减小尺寸或加大抽帧");
+	}
+
+	const double fps = (m_imgDelayMs > 0) ? (1000.0 / m_imgDelayMs) : 0.0;
+	const double secs = (fps > 0) ? (frames / fps) : 0.0;
+
+	/* 分几段拼，不用 %10 %11 —— arg() 对两位数占位符的处理容易踩到
+	 * "%1" 把 "%10" 的前两个字符吃掉，分成短串就没这个风险。 */
+	QString html = QStringLiteral("<span style='color:%1'>%2</span><br/>"
+	                              "%3 帧 × %4 字节 = <b>%5 字节</b>")
+	                   .arg(color, hint)
+	                   .arg(frames)
+	                   .arg(per)
+	                   .arg(total);
+	html += QStringLiteral("（%1 KB，占 %2 的 %3）<br/>")
+	            .arg(total / 1024.0, 0, 'f', 1)
+	            .arg(ChipInfo::formatSize(cap))
+	            .arg(QStringLiteral("%1%").arg(pct, 0, 'f', 1));
+	html += QStringLiteral("帧延时 %1 ms（约 %2 fps），可播 %3 秒")
+	            .arg(m_imgDelayMs)
+	            .arg(fps, 0, 'f', 1)
+	            .arg(secs, 0, 'f', 1);
+
+	m_imgInfo->setText(html);
+}
+
+void MainWindow::togglePlayback()
+{
+	if (m_imgMono.size() < 2)
+	{
+		return;
+	}
+	if (m_imgTimer->isActive())
+	{
+		m_imgTimer->stop();
+		m_imgPlayBtn->setText(QStringLiteral("播放"));
+	}
+	else
+	{
+		m_imgTimer->start(qMax(20, m_imgDelayMs));
+		m_imgPlayBtn->setText(QStringLiteral("暂停"));
+	}
+}
+
+void MainWindow::exportAnimHeader()
+{
+	if (m_imgPacked.isEmpty())
+	{
+		QMessageBox::information(this, QStringLiteral("还没有数据"),
+		                         QStringLiteral("先选一张图片或 GIF。"));
+		return;
+	}
+
+	QString start = QFileInfo(m_imgPath).absolutePath() + QStringLiteral("/anim.h");
+	if (!m_headerPath.isEmpty())
+	{
+		start = QFileInfo(m_headerPath).absolutePath() + QStringLiteral("/anim.h");
+	}
+
+	const QString path = QFileDialog::getSaveFileName(
+		this, QStringLiteral("导出动画头文件"), start,
+		QStringLiteral("C 头文件 (*.h)"));
+	if (path.isEmpty())
+	{
+		return;
+	}
+
+	const ImageGen::Options opt = imageOptions();
+	const QString content = ImageGen::renderHeader(m_imgPacked, opt, m_imgDelayMs,
+	                                               QFileInfo(m_imgPath).fileName());
+
+	QFile file(path);
+	if (!file.open(QIODevice::WriteOnly | QIODevice::Text))
+	{
+		QMessageBox::critical(this, QStringLiteral("写不进去"),
+		                      QStringLiteral("%1\n\n%2").arg(path, file.errorString()));
+		return;
+	}
+	QTextStream ts(&file);
+	ts.setEncoding(QStringConverter::Utf8);
+	ts << content;
+	file.close();
+
+	const int total = m_imgPacked.size()
+	                  * ImageGen::bytesPerFrame(opt.width, opt.height);
+
+	QMessageBox::information(this, QStringLiteral("导出成功"),
+		QStringLiteral("已写入：\n%1\n\n%2 帧，共 %3 字节（%4 KB）\n\n"
+		               "头文件里已带 Anim_ShowFrame()，不需要你写批量写显存的函数。\n"
+		               "只要把文件里【适配区】的两个宏指向你工程的写命令、写数据函数，\n"
+		               "再循环调用 Anim_ShowFrame(i) 就能动起来。")
+		.arg(path)
+		.arg(m_imgPacked.size())
+		.arg(total)
+		.arg(total / 1024.0, 0, 'f', 1));
+}
+
+/* ==========================================================================
+ *  烧录自检帧
+ *
+ *  字库能验证的只有"这个字取模对不对"，而对不对的前提是格式已经匹配。
+ *  格式一错，整个字库都是花的，但花在哪、为什么花，光看一个字根本判断不出来。
+ *  所以需要一张整屏图：边框负责暴露列偏移，四角负责暴露翻转和页序，
+ *  中间的汉字负责暴露位序。一次烧录，全部结论都能拿到。
+ * ========================================================================== */
+
+void MainWindow::showSelfTest()
+{
+	QDialog dlg(this);
+	dlg.setWindowTitle(QStringLiteral("烧录自检帧"));
+	dlg.setMinimumWidth(920);
+
+	QVBoxLayout *root = new QVBoxLayout(&dlg);
+	root->setContentsMargins(18, 16, 18, 14);
+	root->setSpacing(12);
+
+	QLabel *head = new QLabel(QStringLiteral(
+		"整屏一张图，按页整行写进显存。烧进板子刷一次，就能确认"
+		"「工具吐出来的字节」和「你的驱动」是不是同一套格式。"), &dlg);
+	head->setWordWrap(true);
+	root->addWidget(head);
+
+	/* 屏尺寸要能选：128×32 的 0.91" 屏如果刷 128×64 的帧，
+	 * 后 4 页的列命令会落到不存在的页上，屏上只显示上半截，
+	 * 看起来像"驱动少写了半屏"，其实帧和屏对不上。 */
+	QHBoxLayout *sizeRow = new QHBoxLayout();
+	sizeRow->setContentsMargins(0, 0, 0, 0);
+	sizeRow->setSpacing(8);
+	sizeRow->addWidget(new QLabel(QStringLiteral("屏尺寸"), &dlg));
+	QComboBox *sizeBox = new QComboBox(&dlg);
+	sizeBox->addItem(QStringLiteral("128 × 64（0.96\" 全屏）"), QPoint(128, 64));
+	sizeBox->addItem(QStringLiteral("128 × 32（0.91\" 屏）"),   QPoint(128, 32));
+	sizeBox->setCurrentIndex(currentScreenH() == 32 ? 1 : 0);   /* 跟导出组那个「屏」下拉保持一致 */
+	sizeRow->addWidget(sizeBox);
+	sizeRow->addStretch(1);
+	root->addLayout(sizeRow);
+
+	QHBoxLayout *mid = new QHBoxLayout();
+	mid->setSpacing(18);
+
+	/* 放大 4 倍显示。必须用最近邻，插值放大会把点阵糊成灰块，就不是点阵了。
+	 * 尺寸多留 2px 是给 QLabel 自己的 1px 边框 —— 用 styleSheet 的 border 会
+	 * 吃掉内容区，pixmap 边缘被裁掉半个像素，外框看着就不完整了。 */
+	QLabel *screen = new QLabel(&dlg);
+	screen->setFixedSize(SelfTest::W * 4 + 2, SelfTest::H * 4 + 2);
+	screen->setFrameShape(QFrame::Box);
+	screen->setStyleSheet(QStringLiteral("background:#000;"));
+	screen->setAlignment(Qt::AlignCenter);
+	mid->addWidget(screen, 0, Qt::AlignTop | Qt::AlignHCenter);
+
+	QLabel *tips = new QLabel(&dlg);
+	tips->setWordWrap(true);
+	tips->setMinimumWidth(300);
+	tips->setTextFormat(Qt::RichText);
+	tips->setText(QStringLiteral(
+		"<p style='margin:0 0 8px 0'><b>正常应该看到</b></p>"
+		"<p style='margin:0 0 4px 0'>· 四边完整的外框，左右对称</p>"
+		"<p style='margin:0 0 4px 0'>· 左上实心 / 右上空心 / 左下交叉 / 右下棋盘</p>"
+		"<p style='margin:0 0 12px 0'>· 中间一行「取模正确」</p>"
+		"<p style='margin:0 0 8px 0'><b>对不上时看现象</b></p>"
+		"<p style='margin:0 0 4px 0'>右边框少两列、整幅左移 → 屏是 SH1106，驱动要偏移 2 列</p>"
+		"<p style='margin:0 0 4px 0'>画面上下颠倒 → 页序反了（0xC8 ↔ 0xC0）</p>"
+		"<p style='margin:0 0 4px 0'>变成白底黑点 → 极性反了（阳码 / 阴码）</p>"
+		"<p style='margin:0'>字是花条纹、上下错位 → 位序反了（高位 / 低位在前）</p>"));
+	mid->addWidget(tips, 1, Qt::AlignTop);
+
+	root->addLayout(mid);
+
+	QCheckBox *withText = new QCheckBox(&dlg);
+	withText->setChecked(true);
+	withText->setText(QStringLiteral("包含中文（%1×%1 点阵，样例「%2」）")
+	                  .arg(m_gen.size())
+	                  .arg(QStringLiteral("取模正确")));
+	root->addWidget(withText);
+
+	QHBoxLayout *btns = new QHBoxLayout();
+	btns->addStretch(1);
+	QPushButton *toProject = new QPushButton(QStringLiteral("保存到工程"), &dlg);
+	toProject->setObjectName(QStringLiteral("Primary"));
+	QPushButton *saveAs = new QPushButton(QStringLiteral("另存为…"), &dlg);
+	QPushButton *closeBtn = new QPushButton(QStringLiteral("关闭"), &dlg);
+	btns->addWidget(toProject);
+	btns->addWidget(saveAs);
+	btns->addWidget(closeBtn);
+	root->addLayout(btns);
+
+	const QString sampleText = QStringLiteral("取模正确");
+
+	auto sample = [&]() {
+		return withText->isChecked() ? sampleText : QString();
+	};
+
+	auto curSize = [&]() {
+		const QPoint p = sizeBox->currentData().toPoint();
+		return p.isNull() ? QPoint(SelfTest::W, SelfTest::H) : p;
+	};
+
+	auto rebuild = [&]() {
+		const QPoint sz = curSize();
+		screen->setFixedSize(sz.x() * 4 + 2, sz.y() * 4 + 2);
+
+		const QImage img = SelfTest::buildImage(&m_gen, sample(), sz.x(), sz.y());
+		screen->setPixmap(QPixmap::fromImage(
+			img.scaled(sz.x() * 4, sz.y() * 4,
+			           Qt::IgnoreAspectRatio, Qt::FastTransformation)));
+	};
+	rebuild();
+
+	connect(withText, &QCheckBox::toggled, &dlg, [&](bool) { rebuild(); });
+	connect(sizeBox, &QComboBox::currentIndexChanged, &dlg, [&](int) { rebuild(); });
+
+	/* 写文件单独抽出来，因为"保存到工程"和"另存为"只有路径不同 */
+	auto saveTo = [&](const QString &path) {
+		if (path.isEmpty())
+		{
+			return;
+		}
+
+		const QPoint sz = curSize();
+		const QImage img = SelfTest::buildImage(&m_gen, sample(), sz.x(), sz.y());
+		const QString content = SelfTest::renderHeader(
+			SelfTest::pack(img), sample(), m_gen.size(), m_fontBox->currentText(),
+			currentColOffset(), sz.x(), sz.y());
+
+		QFile f(path);
+		if (!f.open(QIODevice::WriteOnly | QIODevice::Text))
+		{
+			QMessageBox::critical(&dlg, QStringLiteral("写不进去"),
+			                      QStringLiteral("%1\n\n%2").arg(path, f.errorString()));
+			return;
+		}
+		QTextStream ts(&f);
+		ts.setEncoding(QStringConverter::Utf8);
+		ts << content;
+		f.close();
+
+		QMessageBox::information(&dlg, QStringLiteral("自检帧已生成"),
+			QStringLiteral("已写入：\n%1\n\n"
+			               "用法：\n"
+			               "1) 这个文件放到 OLED.c 同一目录（比如 Hardware\\）\n"
+			               "2) main.c 里 #include \"OLED_SelfTest.h\"\n"
+			               "3) OLED_Init();\n"
+			               "   OLED_SelfTest_Show();\n"
+			               "   while (1);\n\n"
+			               "屏上四边完整、四角各不同、中间有字，就说明格式对上了。")
+			.arg(path));
+	};
+
+	connect(toProject, &QPushButton::clicked, &dlg, [&]() {
+		if (m_headerPath.isEmpty())
+		{
+			QMessageBox::information(&dlg, QStringLiteral("还不知道工程在哪"),
+				QStringLiteral("点「另存为…」自己挑位置，"
+				               "或回主界面点「设置工程目录…」指一次。"));
+			return;
+		}
+		saveTo(QFileInfo(m_headerPath).absolutePath()
+		       + QStringLiteral("/OLED_SelfTest.h"));
+	});
+
+	connect(saveAs, &QPushButton::clicked, &dlg, [&]() {
+		const QString start = m_headerPath.isEmpty()
+		        ? QDir::homePath() + QStringLiteral("/OLED_SelfTest.h")
+		        : QFileInfo(m_headerPath).absolutePath() + QStringLiteral("/OLED_SelfTest.h");
+		const QString path = QFileDialog::getSaveFileName(
+			&dlg, QStringLiteral("自检帧保存到"), start,
+			QStringLiteral("C 头文件 (*.h)"));
+		if (!path.isEmpty())
+		{
+			saveTo(path);
+		}
+	});
+
+	connect(closeBtn, &QPushButton::clicked, &dlg, &QDialog::accept);
+
+	dlg.exec();
+}
+
+/* ==========================================================================
+ *  一键接入工程
+ *
+ *  导出字库之后，用户手上还差三步手工活：驱动头文件补声明、main.c 补 include、
+ *  补几行示例。这三步没有任何创造性，全是照抄，但每一步都有坑（函数没声明、
+ *  参数顺序反了、Include Path 没配）。工具已经知道工程在哪了，没有理由让用户
+ *  自己抄。
+ *
+ *  但改别人的源码是高危动作，所以这一版的三条底线：
+ *      1) 只插入，绝不修改已有行
+ *      2) 写盘前把每一处插入的文件、行号、内容全摆出来
+ *      3) 每个文件留 .oledbak，一键撤销
+ * ========================================================================== */
+void MainWindow::mergeIntoProject()
+{
+	QDialog dlg(this);
+	dlg.setWindowTitle(QStringLiteral("一键接入工程"));
+	dlg.resize(940, 640);
+
+	QVBoxLayout *root = new QVBoxLayout(&dlg);
+
+	/* ---- 检测结果 ---- */
+	QLabel *head = new QLabel(&dlg);
+	head->setObjectName(QStringLiteral("Hint"));
+	head->setWordWrap(true);
+	head->setTextInteractionFlags(Qt::TextSelectableByMouse);
+	root->addWidget(head);
+
+	/* ---- 示例文字 ---- */
+	QHBoxLayout *txtRow = new QHBoxLayout();
+	txtRow->addWidget(new QLabel(QStringLiteral("示例第 1 行："), &dlg));
+	QLineEdit *line1 = new QLineEdit(QStringLiteral("温度正常"), &dlg);
+	txtRow->addWidget(line1, 1);
+	txtRow->addWidget(new QLabel(QStringLiteral("第 2 行："), &dlg));
+	QLineEdit *line2 = new QLineEdit(QStringLiteral("T=25C 湿度60%"), &dlg);
+	txtRow->addWidget(line2, 1);
+	root->addLayout(txtRow);
+
+	/* ---- 左边勾选清单，右边预览 ---- */
+	QListWidget *stepList = new QListWidget(&dlg);
+	stepList->setMinimumWidth(300);
+	QPlainTextEdit *prev = new QPlainTextEdit(&dlg);
+	prev->setReadOnly(true);
+	prev->setFont(QFontDatabase::systemFont(QFontDatabase::FixedFont));
+	prev->setLineWrapMode(QPlainTextEdit::NoWrap);
+
+	QSplitter *split = new QSplitter(Qt::Horizontal, &dlg);
+	split->addWidget(stepList);
+	split->addWidget(prev);
+	split->setStretchFactor(0, 0);
+	split->setStretchFactor(1, 1);
+	split->setSizes(QList<int>() << 320 << 600);
+	root->addWidget(split, 1);
+
+	QLabel *warn = new QLabel(&dlg);
+	warn->setObjectName(QStringLiteral("Hint"));
+	warn->setWordWrap(true);
+	root->addWidget(warn);
+
+	/* ---- 按钮 ---- */
+	QHBoxLayout *btns = new QHBoxLayout();
+	QPushButton *undoBtn = new QPushButton(QStringLiteral("撤销上次接入…"), &dlg);
+	btns->addWidget(undoBtn);
+	btns->addStretch(1);
+	QPushButton *doBtn = new QPushButton(QStringLiteral("执行"), &dlg);
+	doBtn->setObjectName(QStringLiteral("Primary"));
+	QPushButton *closeBtn = new QPushButton(QStringLiteral("关闭"), &dlg);
+	btns->addWidget(doBtn);
+	btns->addWidget(closeBtn);
+	root->addLayout(btns);
+
+	MergeProject::Scan scan;
+
+	auto showStep = [&](int row) {
+		if (row < 0 || row >= scan.steps.size())
+		{
+			prev->clear();
+			return;
+		}
+		const MergeProject::Step &s = scan.steps.at(row);
+		const QString headText = QStringLiteral("// %1\n// %2\n\n").arg(s.title, s.detail);
+		const QVector<MergeProject::Step> one = { s };
+		prev->setPlainText(headText + MergeProject::previewOf(s.file, one, 3));
+		prev->moveCursor(QTextCursor::Start);
+	};
+
+	/* 重扫：工程结构不会在执行前后大变，但示例文字会变 */
+	auto rescan = [&]() {
+		QSet<QString> keep;         /* 保住用户取消过的勾 */
+		for (int i = 0; i < stepList->count() && i < scan.steps.size(); ++i)
+		{
+			if (stepList->item(i)->checkState() == Qt::Unchecked)
+			{
+				keep.insert(scan.steps.at(i).title);
+			}
+		}
+
+		scan = MergeProject::Scan();
+		if (m_headerPath.isEmpty())
+		{
+			head->setText(QStringLiteral("还没有导出字库。先点「导出 OLED_CFont.h」，再来做接入。"));
+			stepList->clear();
+			prev->clear();
+			doBtn->setEnabled(false);
+			return;
+		}
+
+		if (!MergeProject::detect(m_headerPath, line1->text().trimmed(),
+		                          line2->text().trimmed(), &scan))
+		{
+			head->setText(QStringLiteral("没找到能自动改的地方：\n\n") + scan.error);
+			stepList->clear();
+			prev->clear();
+			doBtn->setEnabled(false);
+			return;
+		}
+
+		QStringList h;
+		h << QStringLiteral("工程：%1").arg(QDir::toNativeSeparators(scan.root));
+		if (!scan.driverC.isEmpty())
+		{
+			h << QStringLiteral("驱动：%1（写命令 %2 / 写数据 %3）")
+			         .arg(QDir::toNativeSeparators(scan.driverC))
+			         .arg(scan.cmdFunc.isEmpty() ? QStringLiteral("没找到") : scan.cmdFunc)
+			         .arg(scan.dataFunc.isEmpty() ? QStringLiteral("没找到") : scan.dataFunc);
+		}
+		if (!scan.mainC.isEmpty())
+		{
+			h << QStringLiteral("主程序：%1").arg(QDir::toNativeSeparators(scan.mainC));
+		}
+		head->setText(h.join(QLatin1Char('\n')));
+
+		stepList->clear();
+		for (const MergeProject::Step &s : scan.steps)
+		{
+			QListWidgetItem *it = new QListWidgetItem(s.title, stepList);
+			it->setFlags(it->flags() | Qt::ItemIsUserCheckable);
+			it->setCheckState(keep.contains(s.title) ? Qt::Unchecked : Qt::Checked);
+			it->setToolTip(s.detail);
+		}
+
+		QStringList w = scan.notes;
+		if (!scan.notes.isEmpty())
+		{
+			w << QString();
+		}
+		w << QStringLiteral("执行前会把这些文件各备份一份（<文件名>.oledbak），"
+		                    "点了执行之后随时能用「撤销上次接入」还原。");
+		warn->setText(w.join(QLatin1Char('\n')));
+
+		doBtn->setEnabled(!scan.steps.isEmpty());
+		if (stepList->count() > 0)
+		{
+			stepList->setCurrentRow(0);
+		}
+		else
+		{
+			prev->setPlainText(QStringLiteral("没有需要改的地方 —— 该补的都补过了。"));
+		}
+	};
+
+	/* 必须先连好再 rescan：rescan 里有 setCurrentRow(0)，
+	 * 信号没连上的话第一次打开预览区是空的。 */
+	connect(line1, &QLineEdit::textChanged, &dlg, [&](const QString &) { rescan(); });
+	connect(line2, &QLineEdit::textChanged, &dlg, [&](const QString &) { rescan(); });
+	connect(stepList, &QListWidget::currentRowChanged, &dlg, [&](int row) { showStep(row); });
+
+	rescan();
+
+	/* ---- 撤销 ---- */
+	connect(undoBtn, &QPushButton::clicked, &dlg, [&]() {
+		if (scan.root.isEmpty())
+		{
+			QMessageBox::information(&dlg, QStringLiteral("没有可撤销的"),
+			                         QStringLiteral("先让工具找到工程。"));
+			return;
+		}
+		QStringList files;
+		QDirIterator it(scan.root, QStringList() << QStringLiteral("*.oledbak"),
+		                QDir::Files, QDirIterator::Subdirectories);
+		while (it.hasNext())
+		{
+			it.next();
+			const QString bak = it.filePath();
+			files << bak.left(bak.size() - 8);      /* 去掉 ".oledbak" */
+		}
+		files = MergeProject::revertable(files);
+		if (files.isEmpty())
+		{
+			QMessageBox::information(&dlg, QStringLiteral("没有可撤销的"),
+			                         QStringLiteral("这个工程里没找到 .oledbak 备份。"));
+			return;
+		}
+
+		const int r = QMessageBox::question(
+			&dlg, QStringLiteral("撤销接入"),
+			QStringLiteral("会把下面这些文件还原成接入之前的样子：\n\n%1\n\n"
+			               "接入之后你自己又改过的内容会一起丢掉。继续吗？")
+				.arg(QDir::toNativeSeparators(files.join(QLatin1Char('\n')))),
+			QMessageBox::Yes | QMessageBox::No, QMessageBox::No);
+		if (r != QMessageBox::Yes)
+		{
+			return;
+		}
+
+		QString err;
+		if (!MergeProject::revert(files, &err))
+		{
+			QMessageBox::critical(&dlg, QStringLiteral("撤销失败"), err);
+			return;
+		}
+		QMessageBox::information(&dlg, QStringLiteral("已还原"),
+		                         QStringLiteral("还原了 %1 个文件，备份已删除。")
+		                             .arg(files.size()));
+		rescan();
+	});
+
+	/* ---- 执行 ---- */
+	connect(doBtn, &QPushButton::clicked, &dlg, [&]() {
+		for (int i = 0; i < stepList->count() && i < scan.steps.size(); ++i)
+		{
+			scan.steps[i].checked = (stepList->item(i)->checkState() == Qt::Checked);
+		}
+
+		QStringList what;
+		for (const MergeProject::Step &s : scan.steps)
+		{
+			if (s.checked)
+			{
+				what << QStringLiteral("· %1").arg(s.title);
+			}
+		}
+		if (what.isEmpty())
+		{
+			QMessageBox::information(&dlg, QStringLiteral("没勾选任何改动"), QString());
+			return;
+		}
+
+		const int r = QMessageBox::question(
+			&dlg, QStringLiteral("确认改这些文件"),
+			QStringLiteral("%1\n\n每个文件会先备份成 .oledbak。继续吗？")
+				.arg(what.join(QLatin1Char('\n'))),
+			QMessageBox::Yes | QMessageBox::No, QMessageBox::Yes);
+		if (r != QMessageBox::Yes)
+		{
+			return;
+		}
+
+		QString err;
+		QStringList touched;
+		if (!MergeProject::apply(scan, &touched, &err))
+		{
+			QMessageBox::critical(&dlg, QStringLiteral("没改成"), err);
+			return;
+		}
+
+		QMessageBox::information(
+			&dlg, QStringLiteral("接好了"),
+			QStringLiteral("改了 %1 个文件：\n\n%2\n\n"
+			               "接下来在 Keil 里 Rebuild 就行。\n"
+			               "要退回去就点「撤销上次接入」。")
+				.arg(touched.size())
+				.arg(QDir::toNativeSeparators(touched.join(QLatin1Char('\n')))));
+		rescan();
+	});
+
+	connect(closeBtn, &QPushButton::clicked, &dlg, &QDialog::accept);
+
+	dlg.exec();
+}
+
 /*
- * 找工程里的 OLED_CFont.h。
+ * 找字库该导出到哪里。
  *
- * 这个工具可以放在任何地方（单独 clone 下来、拷到别的盘都行），
- * 所以这里按优先级依次尝试，都不写死某个人的机器路径：
- *   1. 从 exe 所在目录开始向上找，看哪一层下面有 MyFreeRTOS_C8T6\Hardware
- *   2. 环境变量 OLED_FONT_PROJECT 指定的工程根目录（可选，方便把工具放别处）
- *   3. 都找不到 → 返回空字符串，导出时弹对话框让用户自己选
+ * **判据是工程文件，不是驱动文件名。**
+ * 工程里一定有 .uvprojx / .ewp / .cproject 中的一个，这是"这是一个工程"
+ * 的硬定义；而驱动叫 OLED.c 还是 lcd.c 纯属个人习惯，拿来当判据等于
+ * 把"猜"换了个名字。
  *
- * 找不到是正常情况：导入/导出都有文件对话框，用户可以手动选任意路径。
+ * 优先级：
+ *   1. 用户点过「设置工程目录」明确指定的（记在设置里，最高优先）
+ *   2. 上次导出用过的目录
+ *   3. 从 exe 往上逐层，在每层向下找工程文件（.uvprojx 等），
+ *      找到后在其所在层/上一层挑字库落点
+ *   4. 退一步：找已有的 OLED_CFont.h（老工程、或工程文件不在附近时）
+ *   5. 环境变量 OLED_FONT_DIR
+ *   6. 都没有 → 空，导出时让用户选目录（选完记住）
+ *
+ * 找不到是正常情况，不猜也不乱写。
  */
 QString MainWindow::defaultHeaderPath() const
 {
-	/* 1) 从 exe 所在目录向上找。
-	 *    exe 在 <工程>\oledfonttool\build\ 下，向上两级就是工程根目录；
-	 *    如果工具被单独拷走，这里会一直找到盘根，自然失败。 */
-	QDir dir(QCoreApplication::applicationDirPath());
-	for (int up = 0; up <= 5; ++up)
+	/* 1) 用户明确指定过的工程目录 —— 一切猜测都要让位 */
 	{
-		const QString candidate = dir.absoluteFilePath(QStringLiteral("MyFreeRTOS_C8T6/Hardware"));
-		if (QDir(candidate).exists())
+		const QString root = QSettings().value(QStringLiteral("project/root")).toString();
+		if (!root.isEmpty() && QDir(root).exists())
 		{
-			return QDir(candidate).absoluteFilePath(QStringLiteral("OLED_CFont.h"));
-		}
-		if (!dir.cdUp())
-		{
-			break;
+			const QString dir = pickFontDirIn(root, false);
+			if (!dir.isEmpty())
+			{
+				return QDir(dir).absoluteFilePath(QStringLiteral("OLED_CFont.h"));
+			}
 		}
 	}
 
-	/* 2) 可选：允许用环境变量指定工程位置。
-	 *    适合“工具装在 C 盘、工程在 D 盘”这种情况，用户自己设一个就够了。 */
-	const QByteArray envRoot = qgetenv("OLED_FONT_PROJECT");
-	if (!envRoot.isEmpty())
+	/* 2) 上次用过的目录 —— 下次启动就不用再猜 */
 	{
-		const QString candidate = QDir(QString::fromLocal8Bit(envRoot))
-			.absoluteFilePath(QStringLiteral("MyFreeRTOS_C8T6/Hardware"));
-		if (QDir(candidate).exists())
+		const QString last = QSettings().value(QStringLiteral("export/lastDir")).toString();
+		if (!last.isEmpty() && QDir(last).exists())
 		{
-			return QDir(candidate).absoluteFilePath(QStringLiteral("OLED_CFont.h"));
+			return QDir(last).absoluteFilePath(QStringLiteral("OLED_CFont.h"));
 		}
 	}
 
-	/* 3) 找不到就返回空字符串 —— 表示"猜不准"。
-	 *    调用方（构造函数和导出）会据此弹对话框让用户自己选，
-	 *    而不是默默写到某个用户不知道的地方。 */
+	/* 工具自己的根目录：exe 在 oledfonttool\build\ 或 \package\ 下时，
+	 * 上一级才是。整棵子树都不许扫 —— 否则会命中
+	 * oledfonttool\src\OLED_CFont.h（工具自带的样例），而不是用户工程的。 */
+	const QDir appDir(QCoreApplication::applicationDirPath());
+	QString toolRoot = appDir.absolutePath();
+	{
+		const QString leaf = QFileInfo(toolRoot).fileName().toLower();
+		if (leaf == QLatin1String("build") || leaf == QLatin1String("package"))
+		{
+			toolRoot = QFileInfo(toolRoot).absolutePath();     /* -> ...\oledfonttool */
+		}
+	}
+
+	/* 3) 先找工程文件。深度 3 足够：工程文件要么在根，要么在
+	 *    Project\ / MDK-ARM\ / EWARM\ 这一层。 */
+	{
+		QDir up(appDir.absolutePath());
+		for (int step = 0; step <= 6; ++step)
+		{
+			const QStringList roots = findProjectRootsUnder(up.absolutePath(), 3, toolRoot);
+			if (!roots.isEmpty())
+			{
+				/* 把候选带出去，界面好提示"还有别的工程" */
+				m_projectCandidates = roots;
+
+				const QString best = pickBestProject(roots);
+				const QString fontDir = resolveFontDir(best, toolRoot);
+				if (!fontDir.isEmpty() && QDir(fontDir).exists())
+				{
+					return QDir(fontDir).absoluteFilePath(QStringLiteral("OLED_CFont.h"));
+				}
+			}
+			if (!up.cdUp())
+			{
+				break;
+			}
+		}
+	}
+
+	/* 4) 没有工程文件（比如只是拷了源码、或者工程文件在别处）→
+	 *    找已有的字库文件，从它所在目录继续 */
+	{
+		QDir up(appDir.absolutePath());
+		for (int step = 0; step <= 6; ++step)
+		{
+			const QString hit = findFileUnder(up.absolutePath(), QStringLiteral("OLED_CFont.h"),
+			                                  3, toolRoot);
+			if (!hit.isEmpty())
+			{
+				return QDir(hit).absoluteFilePath(QStringLiteral("OLED_CFont.h"));
+			}
+			if (!up.cdUp())
+			{
+				break;
+			}
+		}
+	}
+
+	/* 5) 环境变量：工具装在 C 盘、工程在 D 盘时，自己设一个就行 */
+	const QByteArray envDir = qgetenv("OLED_FONT_DIR");
+	if (!envDir.isEmpty())
+	{
+		const QDir d(QString::fromLocal8Bit(envDir));
+		if (d.exists())
+		{
+			return d.absoluteFilePath(QStringLiteral("OLED_CFont.h"));
+		}
+	}
+
+	/* 6) 猜不准 → 空字符串，让调用方弹对话框让用户自己选 */
 	return QString();
+}
+
+/*
+ * 手动指定工程目录。
+ *
+ * 存在的意义：自动定位再聪明也是猜，而用户心里非常清楚工程在哪。
+ * 指一次就存进设置，之后 defaultHeaderPath() 第一优先级就是它，
+ * 所有猜测都让位 —— 这比把启发式堆得越来越复杂要可靠。
+ */
+void MainWindow::chooseProjectDir()
+{
+	QString start = QSettings().value(QStringLiteral("project/root")).toString();
+	if (start.isEmpty() || !QDir(start).exists())
+	{
+		start = m_headerPath.isEmpty()
+		        ? QDir(QStandardPaths::writableLocation(QStandardPaths::DocumentsLocation))
+		              .absolutePath()
+		        : QFileInfo(m_headerPath).absolutePath();
+	}
+
+	const QString picked = QFileDialog::getExistingDirectory(
+		this,
+		QStringLiteral("选择 STM32 工程目录（含 .c 源码的那一层）"),
+		start,
+		QFileDialog::ShowDirsOnly | QFileDialog::DontResolveSymlinks);
+	if (picked.isEmpty())
+	{
+		return;
+	}
+
+	/* 存"用户选的"这一层，不存推算结果。以后工程结构变了还能重新推。 */
+	QSettings().setValue(QStringLiteral("project/root"), picked);
+	m_projectCandidates.clear();     /* 已手动指定，不再需要"还有别的工程"的提示 */
+
+	const QString dir = pickFontDirIn(picked, false);
+	const QString target = dir.isEmpty() ? picked : dir;
+
+	m_headerPath = QDir(target).absoluteFilePath(QStringLiteral("OLED_CFont.h"));
+	QSettings().setValue(QStringLiteral("export/lastDir"), target);
+	m_pathLabel->setText(QStringLiteral("导出到：%1").arg(tailPath(m_headerPath, 2)));
+	m_pathLabel->setToolTip(m_headerPath);
+	if (m_projWarn)
+	{
+		m_projWarn->setVisible(false);
+	}
+
+	/* 换工程了，编码检查的对象也变了，重新跑一次 */
+	checkSourceEncoding(false);
+
+	/* 屏型号也是按工程判的，换了工程就得重判 */
+	m_probeDone = false;
+	reprobeScreen();
+
+	/* 芯片容量同样是按工程读的，换工程要重读，否则还在按上一个工程的 Flash 算占比 */
+	readChip();
+	updateStatus();
+	updateImageInfo();
 }
 
 void MainWindow::refreshPreview()
 {
+	/* 先换字号再换字体：setSize 会把字体像素大小一起改掉，
+	 * 顺序反了的话 setFont 用的还是旧字号 */
+	m_gen.setSize(m_sizeBox->currentData().toInt());
+
 	QFont f(m_fontBox->currentText());
-	f.setPixelSize(FontGen::SIZE);
+	f.setPixelSize(m_gen.size());
 	m_gen.setFont(f);
 	m_gen.setThreshold(m_threshold->value());
 
@@ -626,26 +2259,16 @@ void MainWindow::checkSourceEncoding(bool popupOnProblem)
 	QStringList mismatch;       /* 编码不匹配的文件 */
 	QStringList details;
 
-	const QDir rootDir(root);
-	const QStringList scanDirs = {
-		QStringLiteral("User"), QStringLiteral("Hardware"), QStringLiteral("System")
-	};
+	/* 递归找工程里的 .c / .h —— 不依赖子目录叫什么名字。
+	 * 只读文件判断编码，不解析语义，所以扫全一点也没关系；
+	 * 上限 1200 个文件、深度 4 层，够覆盖正常工程。 */
+	QStringList sources;
+	collectSourceFiles(QDir(root), sources, 4, 1200);
+	log << QStringLiteral("扫描到 %1 个 .c/.h 文件").arg(sources.size());
 
-	for (const QString &sub : scanDirs)
+	for (const QString &path : sources)
 	{
-		QDir d(rootDir.absoluteFilePath(sub));
-		log << QStringLiteral("[%1] 存在=%2").arg(sub, d.exists() ? QStringLiteral("是") : QStringLiteral("否"));
-		if (!d.exists())
-		{
-			continue;
-		}
-		const QStringList names = d.entryList(QStringList() << QStringLiteral("*.c")
-		                                                  << QStringLiteral("*.h"),
-		                                      QDir::Files);
-		log << QStringLiteral("    文件 %1 个: %2").arg(names.size()).arg(names.join(QStringLiteral(" ")));
-		for (const QString &name : names)
-		{
-			const QString path = d.absoluteFilePath(name);
+			const QString name = QFileInfo(path).fileName();
 			QString text;
 			const QString enc = detectSourceEncoding(path, &text);
 			if (enc.isEmpty())
@@ -685,7 +2308,6 @@ void MainWindow::checkSourceEncoding(bool popupOnProblem)
 			{
 				mismatch << QStringLiteral("%1（%2）示例：\"%3\"").arg(name, enc, sample);
 			}
-		}
 	}
 
 	if (checked.isEmpty())
@@ -748,27 +2370,206 @@ void MainWindow::writeEncodingLog(const QStringList &lines) const
 	f.close();
 }
 
+/* 从工程源码里判断这屏是 SSD1306 还是 SH1106。
+ * 判不出来不是错误 —— 按最常见的 SSD1306（偏移 0）走，并在界面上说清楚。 */
+void MainWindow::reprobeScreen()
+{
+	m_probeDone = true;
+	m_probe = ScreenProbe::Result();
+
+	QString base = m_headerPath;
+	if (base.isEmpty())
+	{
+		base = defaultHeaderPath();
+	}
+
+	QString root = findProjectRoot(base);
+	if (root.isEmpty() && !base.isEmpty())
+	{
+		/* 字库还没落进工程时，从它所在目录往下找 —— 驱动一般就在旁边 */
+		root = QFileInfo(base).absolutePath();
+	}
+
+	if (root.isEmpty())
+	{
+		m_probe.evidenceOneLine = QStringLiteral(
+			"还没确定工程位置，先按 SSD1306（偏移 0）导出");
+		updateScreenNote();
+		return;
+	}
+
+	m_probe = ScreenProbe::probe(root);
+	updateScreenNote();
+}
+
+/* 把探测结论写进下拉的第一项。
+ *
+ * 单独占一行说明会把「导出」组撑高，1366×768 的屏上最下面的按钮会被顶出去，
+ * 所以结论直接写进选项文字里，判定依据放 tooltip。 */
+void MainWindow::updateScreenNote()
+{
+	if (!m_screenBox)
+	{
+		return;
+	}
+
+	/* 改 item 文字会发 currentIndexChanged，不挡住会递归回来 */
+	const QSignalBlocker block(m_screenBox);
+
+	if (m_probe.ok())
+	{
+		m_screenBox->setItemText(
+			0, QStringLiteral("自动判断 · %1").arg(ScreenProbe::nameOf(m_probe.controller)));
+	}
+	else
+	{
+		m_screenBox->setItemText(0, QStringLiteral("自动判断 · 未识别（先按 SSD1306）"));
+	}
+
+	const QString tip = m_probe.evidence.isEmpty()
+	        ? m_probe.evidenceOneLine
+	        : m_probe.evidenceOneLine + QLatin1Char('\n') + QLatin1Char('\n')
+	          + m_probe.evidence.join(QLatin1Char('\n'));
+	m_screenBox->setItemData(0, tip, Qt::ToolTipRole);
+	m_screenBox->setToolTip(tip);
+}
+
+/* 三份导出文件里那个 *_COL_OFFSET 该填几 */
+int MainWindow::currentColOffset() const
+{
+	const int sel = m_screenBox ? m_screenBox->currentData().toInt() : 0;
+	if (sel == 1)
+	{
+		return 0;
+	}
+	if (sel == 2)
+	{
+		return 2;
+	}
+	return m_probe.colOffset;
+}
+
+int MainWindow::currentScreenH() const
+{
+	const int h = m_screenHBox ? m_screenHBox->currentData().toInt() : 64;
+	return (h == 32) ? 32 : 64;
+}
+
 void MainWindow::updateStatus()
 {
 	const int n = m_preview->glyphCount();
-	const qint64 bytes = FontGen::flashBytes(n, m_asciiFont->isChecked());
+	const int size = m_gen.size();
+	const qint64 bytes = FontGen::flashBytes(n, size, m_asciiFont->isChecked());
 
-	m_countLabel->setText(QStringLiteral("当前 %1 个汉字 · 字库 %2 字节（%3 KB）")
+	/* 底下状态栏已经有完整版了，这里只留能一行放下的短版 —— 折成两行白吃 18 像素 */
+	m_countLabel->setText(QStringLiteral("%1 个汉字 · %2×%2 · %3 字节（%4 KB）")
 	                      .arg(n)
+	                      .arg(size)
 	                      .arg(bytes)
 	                      .arg(QString::number(bytes / 1024.0, 'f', 1)));
 
-	m_status->setText(QStringLiteral("汉字 %1 个 · 字库 %2 字节（%3 KB）\nSTM32F103C8T6 共 64KB Flash")
+	m_status->setText(QStringLiteral("汉字 %1 个 · %2×%2 · 每字 %3 字节 · 字库 %4 字节（%5 KB）")
 	                  .arg(n)
+	                  .arg(size)
+	                  .arg(m_gen.glyphSize())
 	                  .arg(bytes)
 	                  .arg(QString::number(bytes / 1024.0, 'f', 1)));
+
+	/* 芯片那行：型号 + 容量 + 占比。
+	 * 以前这里写死「STM32F103C8T6 共 64KB Flash」，打开 512KB 的工程也在说 64KB。 */
+	const qint64 cap = flashCapacity();
+	const QString chip = m_chip.device.isEmpty() ? QStringLiteral("芯片未识别") : m_chip.device;
+
+	/* 没读到、又没手动选，就明说是按 64KB 估的，别让它看起来像真读到了 */
+	const bool guessed = (!m_chip.ok() && (m_flashBox ? m_flashBox->currentData().toInt() == 0 : true));
+
+	QString flash;
+	if (guessed)
+	{
+		flash = QStringLiteral("%1 · 按 64 KB 估 · 占 %2%")
+		            .arg(chip)
+		            .arg(bytes * 100.0 / cap, 0, 'f', 1);
+	}
+	else
+	{
+		flash = QStringLiteral("%1 · %2 · 占 %3%")
+		            .arg(chip)
+		            .arg(ChipInfo::formatSize(cap))
+		            .arg(bytes * 100.0 / cap, 0, 'f', 1);
+	}
+
+	/* 占比高到影响使用才变色：15% 以下随便放，40% 以上该提醒了 */
+	if (bytes * 100.0 / cap >= 40.0)
+	{
+		flash += QStringLiteral(" ⚠");
+	}
+	m_flashInfo->setText(flash);
+	m_flashInfo->setToolTip(m_chip.detail);
+}
+
+/* 从工程文件读 Flash 容量。换工程要重读 —— 这是唯一一个按工程变、
+ * 又不在「导出」组里的信息。 */
+void MainWindow::readChip()
+{
+	QString root = findProjectRoot(m_headerPath);
+	if (root.isEmpty() && !m_headerPath.isEmpty())
+	{
+		root = QFileInfo(m_headerPath).absolutePath();
+	}
+	m_chip = ChipInfo::read(root);
+	updateChipNote();
+}
+
+/* 下拉第 0 项的文字跟着自动结果走，选它就是"用读到的值" */
+void MainWindow::updateChipNote()
+{
+	if (!m_flashBox)
+	{
+		return;
+	}
+	const QSignalBlocker block(m_flashBox);
+
+	if (m_chip.ok())
+	{
+		m_flashBox->setItemData(0, m_chip.detail, Qt::ToolTipRole);
+	}
+	else
+	{
+		m_flashBox->setItemData(
+			0,
+			m_chip.detail + QLatin1Char('\n') + QStringLiteral("\n没读到就按 64 KB 算。"),
+			Qt::ToolTipRole);
+	}
+}
+
+/* 当前按多大的 Flash 算。手动选的优先，其次自动读到的，最后 64KB 兜底。 */
+qint64 MainWindow::flashCapacity() const
+{
+	const int sel = m_flashBox ? m_flashBox->currentData().toInt() : 0;
+	if (sel > 0)
+	{
+		return static_cast<qint64>(sel) * 1024;
+	}
+	if (m_chip.ok())
+	{
+		return m_chip.flashBytes;
+	}
+	return 64 * 1024;
 }
 
 void MainWindow::exportHeader(bool askForPath)
 {
 	const QString srcText = m_text->toPlainText();
 	QString err;
-	const QString content = m_gen.generateHeader(srcText, &err);
+
+	/* 第一次导出前才去读驱动源码 —— 构造函数里读的话，工程路径可能还没定 */
+	if (!m_probeDone)
+	{
+		reprobeScreen();
+	}
+
+	const QString content = m_gen.generateHeader(srcText, &err, currentColOffset(),
+	                                              currentScreenH());
 
 	/* 诊断：每次导出都把中间结果落盘。
 	 * 生成失败时靠猜没有意义，直接留下证据（文字、生成内容、逐行统计）。 */
@@ -821,6 +2622,9 @@ void MainWindow::exportHeader(bool askForPath)
 	 * 改成手动逐段扫："0x" + 两位十六进制 算一个字节。 */
 	{
 		const QStringList lines = content.split(QLatin1Char('\n'));
+		/* 一行多少字节要跟着字号走：3 字节 UTF-8 编码 + 一个字的点阵。
+		 * 这里原来写死 35（= 3 + 16×16/8），选 24/32 时会误判成"格式错误"并拒绝导出。 */
+		const int stride = m_gen.glyphSize() + 3;
 		int rows = 0;
 		for (int i = 0; i < lines.size(); ++i)
 		{
@@ -849,7 +2653,7 @@ void MainWindow::exportHeader(bool askForPath)
 				}
 			}
 
-			if (bytes != 35)
+			if (bytes != stride)
 			{
 				QString preview = line;
 				if (preview.size() > 80)
@@ -857,8 +2661,15 @@ void MainWindow::exportHeader(bool askForPath)
 					preview = preview.left(80) + QStringLiteral(" ...");
 				}
 				QMessageBox::critical(this, QStringLiteral("导出前自检失败"),
-					QStringLiteral("第 %1 行数出 %2 个字节，期望 35 个。\n\n该行开头：\n%3")
-					.arg(i + 1).arg(bytes).arg(preview));
+					QStringLiteral("第 %1 行数出 %2 个字节，期望 %3 个"
+					               "（%4×%5 点阵 = 3 字节编码 + %6）。\n\n该行开头：\n%7")
+					.arg(i + 1)
+					.arg(bytes)
+					.arg(stride)
+					.arg(m_gen.size())
+					.arg(m_gen.size())
+					.arg(m_gen.glyphSize())
+					.arg(preview));
 				return;
 			}
 		}
@@ -883,25 +2694,53 @@ void MainWindow::exportHeader(bool askForPath)
 	                     (m_askEveryTime->isChecked() || m_headerPath.isEmpty());
 	if (needAsk)
 	{
-		QString start = m_headerPath;
-		if (start.isEmpty())
+		/* 两种情况问的东西不一样：
+		 *   没找到工程 → 问"你的工程在哪"（选目录）
+		 *   勾了每次询问 → 问"存到哪个文件"（选文件，允许改名）
+		 * 混用会让人困惑：明明只想把文件放进工程，却要先给文件起个名。 */
+		if (m_headerPath.isEmpty())
 		{
-			/* 用"文档"目录当对话框的起始位置，比空路径友好 */
-			start = QDir(QStandardPaths::writableLocation(QStandardPaths::DocumentsLocation))
-				.absoluteFilePath(QStringLiteral("OLED_CFont.h"));
+			const QString pickedDir = QFileDialog::getExistingDirectory(
+				this,
+				QStringLiteral("选择你的 STM32 工程目录（含 .c 源码的那一层）"),
+				QDir(QStandardPaths::writableLocation(QStandardPaths::DocumentsLocation))
+					.absolutePath(),
+				QFileDialog::ShowDirsOnly | QFileDialog::DontResolveSymlinks);
+			if (pickedDir.isEmpty())
+			{
+				return;     /* 用户取消了 */
+			}
+
+			/* 大多数人选的是工程根，而字库通常该放进 Hardware / User 这类子目录。
+			 * 这里顺着往下找一层，省掉"导出完还得自己搬"那一步。 */
+			QString target = pickFontDirIn(pickedDir, false);
+			if (target.isEmpty())
+			{
+				target = pickedDir;
+			}
+
+			/* 记的是用户选的"工程根"，不是推算出来的字库层 ——
+			 * 下次换字号、换目录结构还能重新推算，不会把旧路径钉死。 */
+			QSettings().setValue(QStringLiteral("project/root"), pickedDir);
+			m_headerPath = QDir(target).absoluteFilePath(QStringLiteral("OLED_CFont.h"));
 		}
-		const QString picked = QFileDialog::getSaveFileName(
-			this,
-			m_headerPath.isEmpty() ? QStringLiteral("导出到（未自动找到工程目录，请选择位置）")
-			                       : QStringLiteral("导出到"),
-			start,
-			QStringLiteral("C 头文件 (*.h)"));
-		if (picked.isEmpty())
+		else
 		{
-			return;     /* 用户取消了 */
+			const QString picked = QFileDialog::getSaveFileName(
+				this, QStringLiteral("导出到"), m_headerPath,
+				QStringLiteral("C 头文件 (*.h)"));
+			if (picked.isEmpty())
+			{
+				return;     /* 用户取消了 */
+			}
+			m_headerPath = picked;
 		}
-		m_headerPath = picked;
-		m_pathLabel->setText(QStringLiteral("导出到：\n%1").arg(m_headerPath));
+
+		/* 导出过的目录记下来，下次启动直接用它 */
+		QSettings().setValue(QStringLiteral("export/lastDir"),
+		                     QFileInfo(m_headerPath).absolutePath());
+		m_pathLabel->setText(QStringLiteral("导出到：%1").arg(tailPath(m_headerPath, 2)));
+		m_pathLabel->setToolTip(m_headerPath);
 	}
 
 	QFile file(m_headerPath);
@@ -951,7 +2790,8 @@ void MainWindow::exportHeader(bool askForPath)
 			alt.close();
 
 			m_headerPath = savedTo;
-			m_pathLabel->setText(QStringLiteral("导出到：\n%1").arg(savedTo));
+			m_pathLabel->setText(QStringLiteral("导出到：%1").arg(tailPath(savedTo, 2)));
+			m_pathLabel->setToolTip(savedTo);
 
 			const QString installer = srcDir.isEmpty()
 				? QStringLiteral("install-cfont.cmd")
@@ -965,7 +2805,7 @@ void MainWindow::exportHeader(bool askForPath)
 				.arg(savedTo)
 				.arg(installer)
 				.arg(m_preview->glyphCount())
-				.arg(FontGen::flashBytes(m_preview->glyphCount(), false)));
+				.arg(FontGen::flashBytes(m_preview->glyphCount(), m_gen.size(), false)));
 			return;
 		}
 
@@ -1109,14 +2949,38 @@ void MainWindow::exportHeader(bool askForPath)
 	ts << content;
 	file.close();
 
+	/* 记住这个目录：下次启动直接用它，不用再猜（也不依赖工程名） */
+	QSettings().setValue(QStringLiteral("export/lastDir"),
+	                     QFileInfo(m_headerPath).absolutePath());
+
 	/* 写完把路径显示同步一下，避免提示里写着 A、标签上还显示 B */
-	m_pathLabel->setText(QStringLiteral("导出到：\n%1").arg(m_headerPath));
+	m_pathLabel->setText(QStringLiteral("导出到：%1").arg(tailPath(m_headerPath, 2)));
+	m_pathLabel->setToolTip(m_headerPath);
+
+	/* 换了字号，驱动那边不是"重新编译一下"就完事的：
+	 * 数组名变了，查表的步长也变了。这里必须说清楚，否则屏幕上会错位。 */
+	const QString sizeNote = (m_gen.size() == 16)
+		? QString()
+		: QStringLiteral("\n\n注意：这次导出的是 %1×%1 字库，数组名是 %2。\n"
+		                 "驱动里原来写死的 16 / 32 要换成文件开头的\n"
+		                 "OLED_CFONT_W / H / BYTES / STRIDE 这几个宏，\n"
+		                 "否则字会错位或只显示一部分。")
+		  .arg(m_gen.size())
+		  .arg(FontGen::tableName(m_gen.size()));
 
 	QMessageBox::information(this, QStringLiteral("导出成功"),
-	                         QStringLiteral("已写入：\n%1\n\n汉字 %2 个，%3 字节\n在 Keil 里 Rebuild 即可生效。")
+	                         QStringLiteral("已写入：\n%1\n\n%2×%2 点阵，汉字 %3 个，%4 字节\n"
+	                                        "在 Keil 里 Rebuild 即可生效。%5\n\n"
+	                                        "头文件里已带 OLED_CFont_ShowString()，"
+	                                        "工程里没有中文显示函数也能直接用：\n"
+	                                        "把文件里【适配区】的宏指向你的写命令、写数据函数，"
+	                                        "然后调用\n"
+	                                        "    OLED_CFont_ShowString(行, 列, \"要显示的文字\");")
 	                         .arg(m_headerPath)
+	                         .arg(m_gen.size())
 	                         .arg(m_preview->glyphCount())
-	                         .arg(FontGen::flashBytes(m_preview->glyphCount(), false)));
+	                         .arg(FontGen::flashBytes(m_preview->glyphCount(), m_gen.size(), false))
+	                         .arg(sizeNote));
 
 	/* 导出成功后顺便检查一下工程源码的编码。
 	 * 编码不一致时字库能写进去、Keil 也能编译，但屏幕上不会显示汉字，
@@ -1170,7 +3034,8 @@ void MainWindow::importHeader()
 	}
 
 	m_text->setPlainText(merged);
-	m_pathLabel->setText(QStringLiteral("导出到：\n%1").arg(path));
+	m_pathLabel->setText(QStringLiteral("导出到：%1").arg(tailPath(path, 2)));
+	m_pathLabel->setToolTip(path);
 	m_headerPath = path;
 
 	const int before = FontGen::glyphCount(current);

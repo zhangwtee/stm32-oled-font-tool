@@ -51,7 +51,9 @@ int FontPreview::columns() const
 
 int FontPreview::cellSize() const
 {
-	return 64;      /* 缩略图边长，图标网格用的尺寸 */
+	/* 缩略图边长。小字固定 64，大字跟着放大，免得 32x32 撑破格子 */
+	const int glyph = m_gen ? m_gen->size() : FontGen::DEFAULT_SIZE;
+	return std::max(64, glyph * 2);
 }
 
 /* 放进 QScrollArea 后必须实现这个，否则滚动区域算不出内容总高度，
@@ -98,8 +100,9 @@ void FontPreview::paintEvent(QPaintEvent *event)
 
 	const int cols = columnsFor(width(), m_gap);
 	const int cell = cellSize();
-	const int grid = std::max(2, cell / FontGen::SIZE);   /* 一个像素放大成几格 */
-	const int draw = grid * FontGen::SIZE;
+	const int S = m_gen->size();
+	const int grid = std::max(2, cell / S);   /* 一个像素放大成几格 */
+	const int draw = grid * S;
 
 	for (int i = 0; i < m_chars.size(); ++i)
 	{
@@ -120,7 +123,7 @@ void FontPreview::paintEvent(QPaintEvent *event)
 		p.fillRect(box, Qt::black);
 
 		p.setPen(QColor(0x2A, 0x2E, 0x33));
-		for (int k = 0; k <= FontGen::SIZE; ++k)
+		for (int k = 0; k <= S; ++k)
 		{
 			p.drawLine(box.left() + k * grid, box.top(), box.left() + k * grid, box.bottom());
 			p.drawLine(box.left(), box.top() + k * grid, box.right(), box.top() + k * grid);
@@ -128,9 +131,9 @@ void FontPreview::paintEvent(QPaintEvent *event)
 
 		p.setPen(Qt::NoPen);
 		p.setBrush(Qt::white);
-		for (int y = 0; y < FontGen::SIZE; ++y)
+		for (int y = 0; y < S; ++y)
 		{
-			for (int x = 0; x < FontGen::SIZE; ++x)
+			for (int x = 0; x < S; ++x)
 			{
 				if (bits[y][x])
 				{

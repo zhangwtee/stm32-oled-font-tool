@@ -1,0 +1,90 @@
+#ifndef MERGEPROJECT_H
+#define MERGEPROJECT_H
+
+/*==============================================================================
+ *  一键接入：把「字库头文件怎么用」这件事，直接写进用户的工程里
+ *
+ *  解决的问题
+ *  ----------
+ *  OLED_CFont.h 自带显示函数，只跟驱动交换「写命令」「写数据」两个动作。
+ *  但这两步仍然要手工做：
+ *      1) 在驱动的 .h 里补两行函数声明（函数本来在 .c 里，只是没导出）
+ *      2) 在 main.c 里补 #include 和两三行示例
+ *  工具已经把工程目录找到了，这两步完全可以代劳。
+ *
+ *  设计原则
+ *  --------
+ *  · 只加不改：绝不修改用户已有的任何一行，只做「插入」。
+ *  · 可预览：真正写盘前把每一处插入的文件、行号、内容全列出来。
+ *  · 可撤销：每个被改的文件先备份成 <文件名>.oledbak，随时能还原。
+ *  · 幂等：已经有的东西不再加第二遍，重复点不会堆出三份声明。
+ *  · 认内容不认名字：驱动是 OLED.c 还是 lcd.c 都一样找得到，
+ *    判据是「这个 .c 里定义了写命令函数」而不是文件名。
+ *============================================================================*/
+
+#include <QByteArray>
+#include <QString>
+#include <QStringList>
+#include <QVector>
+
+namespace MergeProject {
+
+/* 一处插入 */
+struct Step
+{
+	QString file;               /* 目标文件绝对路径 */
+	int     afterLine = 0;      /* 插在第几行之后（1 基）；0 = 插到文件最前面 */
+	QString text;               /* 要插入的内容，不含行尾符 */
+	QString title;              /* 一句话说明，给用户看 */
+	QString detail;             /* 依据 / 所在位置 */
+	bool    checked = true;     /* 默认勾选 */
+};
+
+struct Scan
+{
+	QString root;               /* 工程根 */
+	QString fontHeader;         /* 字库头文件 */
+	QString driverC;            /* 定义写命令函数的 .c */
+	QString driverH;            /* 它对应的 .h */
+	QString mainC;              /* 调用 OLED_Init 的那个 .c */
+	QString cmdFunc;            /* 嗅探到的「写命令」函数名 */
+	QString dataFunc;           /* 嗅探到的「写数据」函数名 */
+	QString initFunc;           /* main.c 里实际调用的初始化函数名 */
+
+	QVector<Step> steps;
+	QStringList   notes;        /* 需要人看一眼、但工具不该动的事 */
+	QString       error;
+};
+
+/*
+ * 扫描工程，生成待插入清单。只读，不碰任何文件。
+ *
+ * fontHeaderPath ：已经导出好的 OLED_CFont.h 位置，用来推工程根、算 include 相对路径
+ * sample1/sample2：写进 main.c 的两行示例文字（用户可以改）
+ */
+bool detect(const QString &fontHeaderPath,
+            const QString &sample1,
+            const QString &sample2,
+            Scan *out);
+
+/*
+ * 把某个文件应用完这些 step 之后的样子，返回「改动行 ± 上下文」的文本。
+ * 用于写盘前让用户确认。返回值带行号前缀，一眼能看出插在哪。
+ */
+QString previewOf(const QString &file, const QVector<Step> &steps, int context = 3);
+
+/* 真的写盘。每个文件第一次被改时备份成 <文件名>.oledbak */
+bool apply(const Scan &scan, QStringList *touched, QString *err);
+
+/* 从 .oledbak 还原。files 传 apply() 吐出来的那个列表 */
+bool revert(const QStringList &files, QString *err);
+
+/* 有没有备份可退（用来决定「撤销」按钮亮不亮） */
+QStringList revertable(const QStringList &files);
+
+/* 读文件、按内容判断编码（返回可读文本，供界面预览用） */
+QString readAsText(const QString &path);
+
+}   // namespace MergeProject
+
+#endif   // MERGEPROJECT_H

@@ -1,10 +1,10 @@
 @echo off
 rem Copy OLED_CFont.h into a Keil project's Hardware folder.
 rem
-rem The project is located by searching upward from this script for
-rem     MyFreeRTOS_C8T6\Hardware
-rem so the tool keeps working no matter where it is installed; it no longer
-rem assumes the project sits at one fixed relative path.
+rem The project is located by its project file (*.uvprojx / *.ewp / .cproject),
+rem searched upward from this script, so the tool keeps working no matter
+rem where it is installed, what the project is called, and whatever the
+rem driver source file happens to be named.
 rem
 rem This file must stay PURE ASCII with no non-ASCII path literals:
 rem cmd.exe parses .cmd using the system ANSI codepage.
@@ -18,38 +18,68 @@ echo  Install OLED_CFont.h into the Keil project
 echo ============================================================
 echo.
 
-rem ---- 1. walk upward looking for MyFreeRTOS_C8T6\Hardware ----
+rem ---- 1. walk upward looking for the project folder ----
+rem
+rem  The project is identified by its PROJECT FILE (*.uvprojx / *.uvproj /
+rem  *.ewp / .cproject), not by the driver source name. The driver may be
+rem  called OLED.c, lcd.c, display.c ...; the project file is what actually
+rem  defines "this is a project".
+rem
+rem  Fallbacks, strongest first:
+rem     a folder holding Hardware\OLED.c   (old rule, kept for compatibility)
+rem     a folder holding Hardware\         (weakest, only if nothing else)
 set "PROBE=%HERE%"
 set "HW="
+set "WEAK="
 for /l %%i in (1,1,8) do (
     if not defined HW (
-        if exist "!PROBE!MyFreeRTOS_C8T6\Hardware\" (
-            set "HW=!PROBE!MyFreeRTOS_C8T6\Hardware"
+        for /d %%d in ("!PROBE!*") do (
+            if not defined HW call :probe "%%d"
+        )
+    )
+    if not defined HW (
+        pushd "!PROBE!.." 2>nul
+        if errorlevel 1 (
+            rem reached the drive root, stop climbing
         ) else (
-            pushd "!PROBE!.." 2>nul
-            if errorlevel 1 (
-                rem reached the drive root, stop climbing
-            ) else (
-                set "PROBE=!CD!\"
-                popd
-            )
+            set "PROBE=!CD!\"
+            popd
         )
     )
 )
+if not defined HW if defined WEAK set "HW=%WEAK%"
+
+goto :probe_done
+
+:probe
+rem  %~1 = candidate project folder. Sets HW (strong hit) or WEAK (weak hit).
+if defined HW goto :eof
+if exist "%~1\*.uvprojx" goto :probe_project
+if exist "%~1\*.uvproj"  goto :probe_project
+if exist "%~1\*.ewp"     goto :probe_project
+if exist "%~1\.cproject" goto :probe_project
+if exist "%~1\Hardware\OLED.c" set "HW=%~1\Hardware"
+if not defined HW if not defined WEAK if exist "%~1\Hardware" set "WEAK=%~1\Hardware"
+goto :eof
+
+:probe_project
+if exist "%~1\Hardware" ( set "HW=%~1\Hardware" ) else ( set "HW=%~1" )
+goto :eof
+
+:probe_done
 
 if not defined HW (
     echo [ERROR] Could not find the Keil project folder.
     echo.
-    echo  Searched upward from this script for:
-    echo      MyFreeRTOS_C8T6\Hardware
+    echo  Searched upward from this script for a folder containing a
+    echo  project file:  *.uvprojx   *.uvproj   *.ewp   .cproject
     echo.
-    echo  If your project uses a different folder name, just copy
-    echo  OLED_CFont.h into its Hardware folder by hand -- it is one file.
+    echo  If your project lives somewhere else, just copy OLED_CFont.h
+    echo  into the folder that holds your driver .c file -- it is one file.
     echo.
     pause
     exit /b 1
 )
-
 echo  project found: %HW%
 echo.
 
