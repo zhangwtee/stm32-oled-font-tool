@@ -28,6 +28,10 @@ cmake_install.cmake
 .ninja_log
 CMakeUserPresets.json
 
+# 测试的构建与输出目录（tests/*.c 和 tests/fixture/ 是源码，要进仓库）
+oledfonttool/tests/build/
+oledfonttool/tests/out/
+
 # ---- 编译中间件 --------------------------------------------------------
 *.obj
 *.o

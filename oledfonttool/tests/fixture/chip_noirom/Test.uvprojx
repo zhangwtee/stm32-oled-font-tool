@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="UTF-8" standalone="no" ?>
+<Project xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">
+  <Targets>
+    <Target>
+      <TargetName>Test</TargetName>
+      <Device>STM32F103ZE</Device>
+      <ToolsetNumber>0x4</ToolsetNumber>
+    </Target>
+  </Targets>
+</Project>
