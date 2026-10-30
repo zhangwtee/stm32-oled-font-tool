@@ -1581,9 +1581,10 @@ void MainWindow::updateImageInfo()
 	            .arg(delay)
 	            .arg(fps, 0, 'f', 1)
 	            .arg(secs, 0, 'f', 1);
-	if (frameStep() > 1)
+	if (frameStep() > 1 && frames > 1)
 	{
-		/* 抽帧以后延时是放大过的，把原始值也说清楚，免得用户以为工具算错 */
+		/* 抽帧以后延时是放大过的，把原始值也说清楚，免得用户以为工具算错。
+		 * 只有一帧时不提 —— 静态图没有"播放快慢"这回事。 */
 		html += QStringLiteral("<br/>已抽帧：每 %1 帧取 1，延时按 ×%1 放大（GIF 原始 %2 ms）")
 		            .arg(frameStep())
 		            .arg(m_imgDelayMs);
