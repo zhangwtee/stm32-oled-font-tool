@@ -1,9 +1,12 @@
 #include "fontgen.h"
 
+#include <QFile>
 #include <QImage>
 #include <QPainter>
 #include <QRegularExpression>
 #include <QSet>
+#include <QStringConverter>
+#include <QTextStream>
 #include <algorithm>
 
 FontGen::FontGen(const QFont &font, int threshold, int size)
@@ -602,4 +605,32 @@ QString FontGen::parseHeader(const QString &headerContent)
 		}
 	}
 	return result;
+}
+
+QString FontGen::writeTextFile(const QString &path, const QString &text)
+{
+	if (path.isEmpty())
+	{
+		return QStringLiteral("没有指定文件名");
+	}
+
+	QFile file(path);
+	if (!file.open(QIODevice::WriteOnly | QIODevice::Text))
+	{
+		return file.errorString();
+	}
+
+	QTextStream ts(&file);
+	ts.setEncoding(QStringConverter::Utf8);        /* Keil 读 UTF-8 才不会花 */
+	ts << text;
+	ts.flush();
+
+	/* close() 才是落盘那一步：前面 write 进的是缓冲，磁盘满 / 网络盘断开
+	 * 都在这时候才报。imagegen 的 writeHeaderFile 里踩过同一个坑。 */
+	file.close();
+	if (file.error() != QFileDevice::NoError)
+	{
+		return file.errorString();
+	}
+	return QString();
 }

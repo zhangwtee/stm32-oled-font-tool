@@ -1484,6 +1484,16 @@ void MainWindow::syncImageSizeToScreen()
  * 列表里只放名字和关键数字，详细内容摆在这里。 */
 static QString assetDetailText(const ImageAsset &a)
 {
+	/* 帧数报"实际会导出的帧数"，不是原始帧数。
+	 * 抽帧以后两者不一样，而列表那行显示的是导出帧数 ——
+	 * 这里再报原始帧数，用户会看到"列表 2 帧、详情 4 帧"这种自相矛盾。
+	 * 抽帧时把原始帧数补在后面，用户才知道少的帧去哪了。 */
+	const int shown = a.packed.isEmpty() ? a.source.size() : a.packed.size();
+	const QString stepNote =
+		(a.step > 1 && shown != a.source.size())
+			? QStringLiteral("；原始 %1 帧，每 %2 帧取 1").arg(a.source.size()).arg(a.step)
+			: QString();
+
 	QString s;
 	if (a.files.isEmpty())
 	{
@@ -1491,21 +1501,23 @@ static QString assetDetailText(const ImageAsset &a)
 	}
 	else if (a.files.size() == 1)
 	{
-		s = QStringLiteral("%1\n（%2 帧，原尺寸 %3×%4）")
+		s = QStringLiteral("%1\n（%2 帧，原尺寸 %3×%4%5）")
 		        .arg(QFileInfo(a.files.first()).fileName())
-		        .arg(a.source.size())
+		        .arg(shown)
 		        .arg(a.source.isEmpty() ? 0 : a.source.first().width())
-		        .arg(a.source.isEmpty() ? 0 : a.source.first().height());
+		        .arg(a.source.isEmpty() ? 0 : a.source.first().height())
+		        .arg(stepNote);
 	}
 	else
 	{
 		/* 多文件时尺寸可能各不相同，报第一张就行，别编一个"平均尺寸" */
-		s = QStringLiteral("%1 等 %2 个文件\n（按文件名顺序 → 共 %3 帧，首帧 %4×%5）")
+		s = QStringLiteral("%1 等 %2 个文件\n（按文件名顺序 → 共 %3 帧，首帧 %4×%5%6）")
 		        .arg(QFileInfo(a.files.first()).fileName())
 		        .arg(a.files.size())
-		        .arg(a.source.size())
+		        .arg(shown)
 		        .arg(a.source.isEmpty() ? 0 : a.source.first().width())
-		        .arg(a.source.isEmpty() ? 0 : a.source.first().height());
+		        .arg(a.source.isEmpty() ? 0 : a.source.first().height())
+		        .arg(stepNote);
 	}
 	if (!a.note.isEmpty())
 	{
@@ -2296,17 +2308,15 @@ void MainWindow::showSelfTest()
 			SelfTest::pack(img), sample(), m_gen.size(), m_fontBox->currentText(),
 			currentColOffset(), sz.x(), sz.y());
 
-		QFile f(path);
-		if (!f.open(QIODevice::WriteOnly | QIODevice::Text))
+		/* 打开成功不等于写成功：磁盘满、U 盘拔掉、杀软拦下写入这些情况，
+		 * open() 是成功的，失败要等 close() 落盘才暴露。交给统一的一处判断。 */
+		const QString err = FontGen::writeTextFile(path, content);
+		if (!err.isEmpty())
 		{
 			QMessageBox::critical(&dlg, QStringLiteral("写不进去"),
-			                      QStringLiteral("%1\n\n%2").arg(path, f.errorString()));
+			                      QStringLiteral("%1\n\n%2").arg(path, err));
 			return;
 		}
-		QTextStream ts(&f);
-		ts.setEncoding(QStringConverter::Utf8);
-		ts << content;
-		f.close();
 
 		QMessageBox::information(&dlg, QStringLiteral("自检帧已生成"),
 			QStringLiteral("已写入：\n%1\n\n"
@@ -3403,16 +3413,13 @@ void MainWindow::exportHeader(bool askForPath)
 
 		for (int i = 0; i < fallbacks.size(); ++i)
 		{
-			QFile alt(fallbacks.at(i));
-			if (!alt.open(QIODevice::WriteOnly | QIODevice::Text))
+			/* 写成功才认，写不完就换下一个位置：原来只要 open 成功就
+			 * 弹"导出成功（需要手动搬运）"，磁盘满时搬过去的是个空文件。 */
+			if (!FontGen::writeTextFile(fallbacks.at(i), content).isEmpty())
 			{
 				continue;
 			}
-			QTextStream altTs(&alt);
-			altTs.setEncoding(QStringConverter::Utf8);
-			altTs << content;
 			const QString savedTo = fallbacks.at(i);
-			alt.close();
 
 			m_headerPath = savedTo;
 			m_pathLabel->setText(QStringLiteral("导出到：%1").arg(tailPath(savedTo, 2)));
@@ -3572,7 +3579,20 @@ void MainWindow::exportHeader(bool askForPath)
 	QTextStream ts(&file);
 	ts.setEncoding(QStringConverter::Utf8);        /* 必须是 UTF-8，Keil 才不会读花 */
 	ts << content;
+	ts.flush();
 	file.close();
+
+	/* 落盘也要确认。这一行原来是缺的：写进缓冲就报"导出成功"，
+	 * 磁盘满 / U 盘拔掉时用户拿到的是半截文件，而界面说成功了。 */
+	if (file.error() != QFileDevice::NoError)
+	{
+		QMessageBox::critical(this, QStringLiteral("导出失败"),
+			QStringLiteral("文件已经打开，但内容没写完：\n%1\n\n%2\n\n"
+			               "最常见的原因是磁盘满了，或者文件正被别的程序写入。\n"
+			               "请腾出空间后重新导出。")
+				.arg(m_headerPath, file.errorString()));
+		return;
+	}
 
 	/* 记住这个目录：下次启动直接用它，不用再猜（也不依赖工程名） */
 	QSettings().setValue(QStringLiteral("export/lastDir"),

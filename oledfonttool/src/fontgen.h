@@ -72,6 +72,14 @@ public:
 	/* 从已有的头文件里把汉字编码读回来（导入用） */
 	static QString parseHeader(const QString &headerContent);
 
+	/* 把一段文本写成 UTF-8 文件，成功返回空串，失败返回原因。
+	 *
+	 * 为什么不能只判断 open()：磁盘满、U 盘拔了、网络盘断开、杀软拦下写入
+	 * 这些情况，open 是成功的，write() 也可能"成功"（写进缓冲），
+	 * 真正的失败在 close() 落盘那一步才出现。不查这一次，
+	 * 界面就会弹"导出成功"，而用户手上的文件是空的或者缺了半截。 */
+	static QString writeTextFile(const QString &path, const QString &text);
+
 private:
 	QVector<QVector<bool>> renderBits(QChar ch) const;
 

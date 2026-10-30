@@ -678,6 +678,42 @@ int main(int argc, char **argv)
 		                                 QStringLiteral("x")).isEmpty());
 	}
 
+	/* ---------------- 写文本文件（三条导出路径共用） ----------------
+	 * 字库导出、自检帧、图片导出都是"生成一段文本 → 写进文件"，
+	 * 而且都踩过同一个坑：open() 成功就报"导出成功"，磁盘满时
+	 * 用户拿到半截文件。失败那一半（磁盘满）在测试里造不出来，
+	 * 能测的是"失败必须给出原因"和"成功时内容/编码一字不差"。 */
+	{
+		const QString p = QDir(outDir).absoluteFilePath(QStringLiteral("text_utf8.h"));
+		const QString body = QStringLiteral("/* 汉字 */\n#define X 1\n");
+		const QString err = FontGen::writeTextFile(p, body);
+		check("写文本文件成功时返回空", err.isEmpty(), err);
+
+		QFile rf(p);
+		QByteArray raw;
+		if (rf.open(QIODevice::ReadOnly))
+		{
+			raw = rf.readAll();
+			rf.close();
+		}
+		QString got = QString::fromUtf8(raw);
+		check("写出来的内容原样（按 UTF-8 读回）",
+		      got.replace(QStringLiteral("\r\n"), QStringLiteral("\n")) == body,
+		      QStringLiteral("%1 字节").arg(got.size()));
+		/* Keil 里汉字变花/变空的根因就是编码：必须是 UTF-8 三字节，不是 GBK */
+		check("中文按 UTF-8 落盘（不是 GBK）",
+		      raw.contains(QByteArray::fromHex("e6b189")),
+		      QStringLiteral("没找到「汉」的 UTF-8 字节"));
+
+		check("空路径被挡住", !FontGen::writeTextFile(QString(), body).isEmpty());
+		check("目录不存在时返回原因",
+		      !FontGen::writeTextFile(
+		           QDir(outDir).absoluteFilePath(QStringLiteral("nope/x.h")), body)
+		           .isEmpty());
+		/* 目标是个已存在的目录：open 必须失败，不能当"写成功" */
+		check("目标是目录时返回原因", !FontGen::writeTextFile(outDir, body).isEmpty());
+	}
+
 	std::printf("\n%d passed, %d failed\n", g_pass, g_fail);
 	return g_fail == 0 ? 0 : 1;
 }
