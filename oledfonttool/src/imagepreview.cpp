@@ -1,5 +1,7 @@
 #include "imagepreview.h"
 
+#include <QFont>
+#include <QFontMetrics>
 #include <QPainter>
 #include <QPaintEvent>
 
@@ -107,9 +109,78 @@ void ImagePreview::paintEvent(QPaintEvent *event)
     p.setRenderHint(QPainter::SmoothPixmapTransform, false);
     p.drawImage(target, img);
 
+    /* 放大到 4 倍以上时画像素网格。
+     *
+     * 这个预览是整数倍最近邻放大，64×64 的图在几百像素的面板里会放大 7 倍，
+     * 抖动出来的 4×4 周期就被拉成 28×28 的大方块 —— 看着像花屏，
+     * 实际屏上（0.96" 屏像素间距约 0.15mm）根本看不出来。
+     * 画上格子，一眼就能看出"这是一格一格的像素"，而不是一片噪点。
+     *
+     * 颜色取中性灰半透明：白底上显浅灰、黑底上显深灰，两边都看得见，
+     * 又不会把点阵本身的疏密盖住。放大倍数越小格子越密，透明度跟着降低，
+     * 免得整片糊成灰雾。 */
+    if (scale >= 4)
+    {
+        /* 4 倍时格子只有 4 像素宽，线再深就糊成灰雾；6 倍以上给足对比度，
+         * 白底上约 230、黑底上约 30，两种底色都看得出来。 */
+        const int alpha = (scale >= 6) ? 55 : 38;
+        p.setPen(QPen(QColor(140, 140, 140, alpha), 1));
+        for (int i = 1; i < img.width(); ++i)
+        {
+            const int x = target.left() + i * scale;
+            p.drawLine(x, target.top(), x, target.bottom() - 1);
+        }
+        for (int j = 1; j < img.height(); ++j)
+        {
+            const int y = target.top() + j * scale;
+            p.drawLine(target.left(), y, target.right() - 1, y);
+        }
+    }
+
     /* 画一圈边框，方便看清屏幕边界 */
     p.setPen(QColor(0x3A, 0x42, 0x4E));
     p.drawRect(target.adjusted(-1, -1, 1, 1));
+
+    /* 标出真实点阵尺寸和当前放大倍数。不写这一行，用户看到的是"一张 448×448
+     * 的图"，很难意识到那其实是 64×64 放大 7 倍的结果，于是把放大后的方块
+     * 当成实际显示效果。
+     *
+     * 位置放在图片上方／下方的空白里，不放图片内部 —— 压在点阵上会盖掉一块
+     * 图案，128×64 只放大 3 倍、图又窄的时候尤其明显。 */
+    QFont tagFont = font();
+    tagFont.setPixelSize(12);
+    /* 显式给一个中文字体：默认字体在没有字体配置的环境里解析出来可能根本
+     * 不含汉字，画出来是一排方框。Windows 上雅黑必然存在，缺了 Qt 会自己回退。 */
+    tagFont.setFamily(QStringLiteral("Microsoft YaHei"));
+    p.setFont(tagFont);
+
+    const QString tag = (scale > 1)
+            ? QStringLiteral("%1×%2 · 放大 %3×")
+                  .arg(img.width()).arg(img.height()).arg(scale)
+            : QStringLiteral("%1×%2").arg(img.width()).arg(img.height());
+    const QFontMetrics fm(tagFont);
+    const int tagW = fm.horizontalAdvance(tag) + 12;
+    const int tagH = fm.height() + 4;
+
+    int tagY;
+    if (target.top() - tagH - 6 >= 0)
+    {
+        tagY = target.top() - tagH - 6;
+    }
+    else if (target.bottom() + 6 + tagH <= height())
+    {
+        tagY = target.bottom() + 6;
+    }
+    else
+    {
+        tagY = target.top() + 2;        /* 上下都没地方了，只能压在图里 */
+    }
+    const int tagX = qBound(4, target.left(), qMax(4, width() - tagW - 4));
+
+    const QRect tagRect(tagX, tagY, tagW, tagH);
+    p.fillRect(tagRect, QColor(0, 0, 0, 170));
+    p.setPen(QColor(0xC8, 0xD0, 0xDA));
+    p.drawText(tagRect, Qt::AlignCenter, tag);
 
     if (m_frames.size() > 1)
     {
