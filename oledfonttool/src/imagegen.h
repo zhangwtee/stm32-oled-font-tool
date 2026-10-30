@@ -116,7 +116,10 @@ public:
     struct FrameBatch
     {
         QVector<QImage> frames;        /* 读到的帧，已按播放顺序排好 */
-        QStringList     files;         /* 实际参与的文件，已按播放顺序排好 */
+        /* 传进来的文件，已按播放顺序排好。注意它包含"一帧都没贡献"的：
+         * 读失败的（见 failed）、撞上限没读的（见 skippedFiles）。
+         * 想知道哪几个文件真的出了帧，看 frames 和 failed 对不上就够了。 */
+        QStringList     files;
         int             delayMs = 0;   /* 0 = 没有任何文件提供延时（静态图） */
         int             totalFrames = 0; /* 这些文件里本来一共有多少帧 */
         int             limitFrames = 0; /* 本批次用的帧数上限 */

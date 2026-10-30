@@ -531,6 +531,25 @@ int main(int argc, char **argv)
 		      QStringLiteral("got %1").arg(poor.frames.size()));
 		check("预算不足的原因记成内存", poor.cappedByMemory && !poor.cappedByCount);
 
+		/* 预算不足不等于"文件读不出来"。
+		 * 原来一帧都没收就一律塞进 failed，界面上于是出现
+		 * "下面这些读不出图像，已跳过：frame1.png、frame2.png、frame10.png" ——
+		 * 三张好好的图被说成坏的，用户拿着图去找为什么打不开。
+		 * 真正的原因（预算）其实写在另一行，两句话互相打脸。 */
+		check("预算不足不记成读不出图像", poor.failed.isEmpty(),
+		      poor.failed.join(QStringLiteral(",")));
+
+		/* 坏文件 + 预算不足混在一起：failed 里只能有那个真的坏的 */
+		QStringList poorAndBad = raw;
+		poorAndBad << dir + QStringLiteral("/zz_nope.png");
+		const ImageGen::FrameBatch mixed = ImageGen::loadFrames(poorAndBad, 600, 100);
+		check("预算不足时 failed 只留真坏的文件",
+		      mixed.failed.size() == 1
+		          && mixed.failed.first() == QStringLiteral("zz_nope.png"),
+		      mixed.failed.join(QStringLiteral(",")));
+		check("预算不足时仍然标记成内存原因", mixed.cappedByMemory,
+		      QStringLiteral("cappedByMemory=%1").arg(mixed.cappedByMemory));
+
 		/* GIF：一个文件展开成多帧，并带回它自己的延时 */
 		const QString gif = QDir(QCoreApplication::applicationDirPath())
 		                        .absoluteFilePath(QStringLiteral("fixture/move.gif"));

@@ -714,7 +714,17 @@ ImageGen::FrameBatch ImageGen::loadFrames(const QStringList &paths,
 
         if (added == 0)
         {
-            batch.failed << QFileInfo(ordered.at(i)).fileName();
+            /* 一帧都没收进来有两种原因，界面上的话完全不同：
+             *   文件坏了      → "读不出图像"，用户该换一张图
+             *   内存预算不够  → 文件没问题，只是这批读不下，用户该少选几张
+             * 原来两种都塞进 failed，于是界面把好好的文件列进
+             * "下面这些读不出图像，已跳过"，用户拿着图去找为什么打不开，
+             * 而真正的原因（预算）只写在另一行的"只收了前 N 帧"里。
+             * 预算这类不算失败，交给 cappedByMemory 说。 */
+            if (!byMemory)
+            {
+                batch.failed << QFileInfo(ordered.at(i)).fileName();
+            }
             if (budget <= 0)
             {
                 break;      /* 预算见底，后面的文件也读不进来 */
