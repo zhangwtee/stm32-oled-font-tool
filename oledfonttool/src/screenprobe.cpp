@@ -33,7 +33,8 @@ namespace
 {
 
 /* 把注释换成空格，长度和换行位置都不变 —— 这样行号还能对上原文件。
- * 顺带跳过双引号字符串里的内容，免得 "http://..." 这种被当成行注释。 */
+ * 顺带跳过双引号字符串和单引号字符常量里的内容，免得 "http://..." 这种被当成
+ * 行注释，也免得 char q = '"'; 里的双引号把后面的代码整段吞进"字符串"状态。 */
 QString stripComments(const QString &src)
 {
 	QString out = src;
@@ -41,6 +42,7 @@ QString stripComments(const QString &src)
 	bool inBlock = false;
 	bool inLine = false;
 	bool inStr = false;
+	bool inChar = false;                    /* 单引号字符常量 */
 
 	for (int i = 0; i < n; ++i)
 	{
@@ -50,6 +52,7 @@ QString stripComments(const QString &src)
 		if (c == QLatin1Char('\n'))
 		{
 			inLine = false;                 /* 行注释到行尾自动结束 */
+			inChar = false;                 /* 字符常量不跨行；没闭合说明那个 ' 不是常量开头 */
 			continue;
 		}
 		if (inLine)
@@ -84,6 +87,18 @@ QString stripComments(const QString &src)
 			}
 			continue;
 		}
+		if (inChar)
+		{
+			if (c == QLatin1Char('\\'))
+			{
+				++i;                        /* 转义，比如 '\'' */
+			}
+			else if (c == QLatin1Char('\''))
+			{
+				inChar = false;
+			}
+			continue;
+		}
 
 		if (c == QLatin1Char('/') && next == QLatin1Char('/'))
 		{
@@ -102,6 +117,10 @@ QString stripComments(const QString &src)
 		else if (c == QLatin1Char('"'))
 		{
 			inStr = true;
+		}
+		else if (c == QLatin1Char('\''))
+		{
+			inChar = true;
 		}
 	}
 	return out;
@@ -214,23 +233,53 @@ void scoreFile(const QString &path, Tally *t)
 	const QStringList rawLines = splitLines(raw);
 
 	/* ---- 1. 型号字样：注释里写型号是最常见的做法，所以查原文 ---- */
+	/*
+	 * 不能"看到 SH1106 就定案"。驱动注释里写「兼容 SSD1306 / SH1106」，或者同一份
+	 * 文件里既有 #define SH1106 又有 SSD1306 分支，都是常见写法；谁先出现就先命中，
+	 * 结果 SSD1306 的屏被判成 SH1106，列偏移变成 2，整幅画面左移两个像素 ——
+	 * 屏没坏，但看得出不对，而且很难想到是这里的问题。
+	 *
+	 * 所以先把这份文件里两边各出现几次数清楚：
+	 *   只有一边提到  -> 定案，直接给 100 分，后面的文件不用再扫
+	 *   两边都提到    -> 这份源码自己就分不清，不给分，交给下面的代码特征去判
+	 */
+	int shHits = 0;
+	int ssHits = 0;
+	int shLine = 0;
+	int ssLine = 0;
 	for (int i = 0; i < rawLines.size(); ++i)
 	{
 		const QString &ln = rawLines.at(i);
 		if (ln.contains(QLatin1String("SH1106"), Qt::CaseInsensitive))
 		{
-			t->sh1106 += 100;
-			addEvidence(t, path, i + 1,
-			            QStringLiteral("源码里写明了 SH1106：%1").arg(snippet(rawLines, i + 1)));
-			return;                            /* 写明了就不用再猜 */
+			if (shHits == 0)
+			{
+				shLine = i + 1;
+			}
+			++shHits;
 		}
 		if (ln.contains(QLatin1String("SSD1306"), Qt::CaseInsensitive))
 		{
-			t->ssd1306 += 100;
-			addEvidence(t, path, i + 1,
-			            QStringLiteral("源码里写明了 SSD1306：%1").arg(snippet(rawLines, i + 1)));
-			return;
+			if (ssHits == 0)
+			{
+				ssLine = i + 1;
+			}
+			++ssHits;
 		}
+	}
+	if (shHits > 0 && ssHits == 0)
+	{
+		t->sh1106 += 100;
+		addEvidence(t, path, shLine,
+		            QStringLiteral("源码里写明了 SH1106：%1").arg(snippet(rawLines, shLine)));
+		return;                                /* 写明了就不用再猜 */
+	}
+	if (ssHits > 0 && shHits == 0)
+	{
+		t->ssd1306 += 100;
+		addEvidence(t, path, ssLine,
+		            QStringLiteral("源码里写明了 SSD1306：%1").arg(snippet(rawLines, ssLine)));
+		return;
 	}
 
 	/* ---- 2. 设列地址的地方多加了 2：SH1106 最典型的写法 ---- */

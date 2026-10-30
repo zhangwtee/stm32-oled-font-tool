@@ -82,16 +82,22 @@ qint64 capacityFromPartNumber(const QString &device)
 	 *       ^ ^^^ ^ ^
 	 *       |  |  |  +-- 容量码（E = 512KB）
 	 *       |  |  +----- 引脚数（Z = 144）
-	 *       |  +-------- 子系列（103）
+	 *       |  +-------- 子系列（103 / 030 / 0B1 / 7A3）
 	 *       +----------- 系列（F / G / L / H / U / W）
 	 *
-	 * 数字段写 {2,4}：F1/F4/H7 是 3 位（103、407、743），G0/G4 是 4 位（030、431）。
+	 * 子系列固定按 3 个字符收，不能写成"至少两位数字"：
+	 *   老型号是纯数字（F103、G030、H743），但新型号的子系列带字母 ——
+	 *   G0B1、H7A3、L4P5、U5A5 都是真实存在的型号，只认数字的话这些全解码失败，
+	 *   会一路退到最后一步报"没找到工程文件"，而工程文件其实找到了。
+	 *   定长 3 位也顺带避开贪婪问题：G0B1RET6 若写成 {1,3} 贪婪，会把 "0B1R"
+	 *   整段吃进子系列，容量码就取成了 T（温度/封装），错得更隐蔽。
+	 *
 	 * 末尾的 T6（温度+封装）不能参与 —— 直接取最后一个字母的话，
 	 * STM32F103C8 会取到 8（对），但 STM32F103C8T6 会取到 T（错），
 	 * 所以必须按位置取第 4 个捕获组。
 	 */
 	static const QRegularExpression re(
-		QStringLiteral("STM32([FGLHUW])([0-9]{2,4})([A-Z])([0-9A-Z])"),
+		QStringLiteral("STM32([FGLHUW])([0-9A-Z]{3})([A-Z])([0-9A-Z])"),
 		QRegularExpression::CaseInsensitiveOption);
 
 	const QRegularExpressionMatch m = re.match(device.trimmed());

@@ -43,6 +43,14 @@ add_executable(test_chip
 target_include_directories(test_chip PRIVATE ../src)
 target_link_libraries(test_chip PRIVATE Qt6::Core)
 
+# 一键接入：会真的写文件，重点测"改完文件还是不是好的"（BOM、插入位置、撤销）
+add_executable(test_merge
+    test_merge.cpp
+    ../src/mergeproject.cpp
+)
+target_include_directories(test_merge PRIVATE ../src)
+target_link_libraries(test_merge PRIVATE Qt6::Core)
+
 # 把样例驱动复制到 exe 旁边，运行时不用带参数
 add_custom_command(TARGET test_probe POST_BUILD
     COMMAND ${CMAKE_COMMAND} -E copy_directory

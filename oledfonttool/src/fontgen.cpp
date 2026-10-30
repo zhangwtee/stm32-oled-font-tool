@@ -436,6 +436,12 @@ static CF_UNUSED void OLED_CFont_ShowGlyph(uint8_t line, uint16_t xPixel,
         return;
     }
 
+    if (line == 0)
+    {
+        return;                 /* line 从 1 起。传 0 会让 (line-1) 回绕成 65534，
+                                   下面的页范围检查跟着失效，数据写到第 6/7 页上 */
+    }
+
     base = (uint16_t)((line - 1) * OLED_CFONT_PAGES);
     if ((uint16_t)(base + OLED_CFONT_PAGES) > (uint16_t)(CF_SCREEN_H / 8))
     {

@@ -121,24 +121,41 @@ static QByteArray encodeTo(const QString &s, Enc e)
 /* QByteArray(目标编码) -> QString */
 static QString decodeFrom(const QByteArray &b, Enc e)
 {
+	QString s;
 	if (e == EncUtf8)
 	{
-		return QString::fromUtf8(b);
+		s = QString::fromUtf8(b);
 	}
-#ifdef Q_OS_WIN
+	else
 	{
+#ifdef Q_OS_WIN
 		const int n = ::MultiByteToWideChar(936, 0, b.constData(), b.size(), nullptr, 0);
 		if (n <= 0)
 		{
-			return QString::fromUtf8(b);
+			s = QString::fromUtf8(b);
 		}
-		QVector<ushort> buf(n);
-		::MultiByteToWideChar(936, 0, b.constData(), b.size(), reinterpret_cast<LPWSTR>(buf.data()), n);
-		return QString::fromUtf16(reinterpret_cast<const char16_t *>(buf.constData()), n);
-	}
+		else
+		{
+			QVector<ushort> buf(n);
+			::MultiByteToWideChar(936, 0, b.constData(), b.size(),
+			                      reinterpret_cast<LPWSTR>(buf.data()), n);
+			s = QString::fromUtf16(reinterpret_cast<const char16_t *>(buf.constData()), n);
+		}
 #else
-	return QString::fromUtf8(b);
+		s = QString::fromUtf8(b);
 #endif
+	}
+
+	/* UTF-8 BOM 会被 fromUtf8 原样保留成首字符 U+FEFF。
+	 * 它挡在行首，`^[ \t]*#` 这类正则就认不出第 1 行的 #include（BOM 既不是
+	 * 空格也不是 Tab），插入位置于是算成 0 —— BOM 反而被新内容挤到第二行，
+	 * 文件不再以 BOM 开头，下次探测编码会把中文误判成 GBK。
+	 * 这里统一摘掉，保存时由 apply 把它补回文件最前面。 */
+	if (!s.isEmpty() && s.at(0) == QChar(0xFEFF))
+	{
+		s.remove(0, 1);
+	}
+	return s;
 }
 
 /*
@@ -251,21 +268,29 @@ struct FuncDef
 	QString name;
 	QString params;
 	bool    isStatic = false;
+	bool    inlineBody = false;     /* 左花括号写在同一行 */
 };
 
 static bool parseFuncDef(const QString &line, FuncDef *out)
 {
+	/*
+	 * 末尾的 (\{)? 是为了认同行花括号：`void OLED_WR_CMD(u8 cmd) {`。
+	 * 以前要求签名后必须只有空白、花括号另起一行，于是这种很常见的写法
+	 * 一个都匹配不到，整个"找到驱动"的流程直接失败，报"没找到 OLED 驱动"。
+	 * 第 5 组捕获到 { 就说明函数体在同一行，不必再去看下一行。
+	 */
 	static const QRegularExpression re(
 		QStringLiteral("^[ \\t]*(?:(static)\\s+)?(?:void|u8|uint8_t|unsigned\\s+char)\\s+"
-		               "([A-Za-z_]\\w*)\\s*\\(([^)]*)\\)\\s*$"));
+		               "([A-Za-z_]\\w*)\\s*\\(([^)]*)\\)\\s*(\\{)?\\s*$"));
 	const QRegularExpressionMatch m = re.match(line);
 	if (!m.hasMatch())
 	{
 		return false;
 	}
-	out->isStatic = m.captured(1).size() > 0;
-	out->name     = m.captured(2);
-	out->params   = m.captured(3).trimmed();
+	out->isStatic   = m.captured(1).size() > 0;
+	out->name       = m.captured(2);
+	out->params     = m.captured(3).trimmed();
+	out->inlineBody = m.captured(4).size() > 0;
 	return true;
 }
 
@@ -323,9 +348,10 @@ static bool sniffDriver(const QString &cPath, Driver *out)
 		{
 			continue;
 		}
-		/* 函数体在下一行（或本行后面），下一行得是 { */
-		bool hasBody = false;
-		if (i + 1 < lines.size())
+		/* 函数体开始：要么左花括号已经写在同一行（parseFuncDef 捕获到了），
+		 * 要么下一行以 { 开头。两种写法在实际驱动里都很常见。 */
+		bool hasBody = fd.inlineBody;
+		if (!hasBody && i + 1 < lines.size())
 		{
 			hasBody = decodeFrom(lines.at(i + 1), enc).trimmed().startsWith(QLatin1Char('{'));
 		}
@@ -781,10 +807,13 @@ bool detect(const QString &fontHeaderPath,
 	}
 	else
 	{
+		/* 注意占位符必须 %1/%2/%3 各出现一次：多参数 arg() 是单次扫描，
+		 * 同一个 %1 出现两次会都换成文件名，用户照抄就会得到
+		 * "void oled.c(uint8_t Command);" 这种编不过的东西。 */
 		out->notes << QStringLiteral(
 			"找到了驱动 %1，但它旁边没有同名 .h 文件。\n"
 			"请手动把下面两行加到驱动头文件里：\n"
-			"    void %1(uint8_t Command);\n    void %2(uint8_t Data);")
+			"    void %2(uint8_t Command);\n    void %3(uint8_t Data);")
 		                  .arg(QFileInfo(drv.cFile).fileName(), drv.cmdFunc, drv.dataFunc);
 	}
 
@@ -998,8 +1027,21 @@ bool apply(const Scan &scan, QStringList *touched, QString *err)
 		f.close();
 
 		const Enc enc = detectEnc(raw);
+
+		/* 把 UTF-8 BOM 摘出来单独保管，写完再补回最前面。
+		 * 留在第 1 行内容里的话，一旦插入点算成 0，BOM 就被挤到第二行行首：
+		 * 文件头成了新插入的那行，BOM 落到中间，armcc/MSVC 会报非法字符，
+		 * 而且文件不再以 BOM 开头，下次本工具探测编码会把中文误判成 GBK。 */
+		QByteArray bom;
+		QByteArray body = raw;
+		if (body.startsWith("\xEF\xBB\xBF"))
+		{
+			bom = body.left(3);
+			body.remove(0, 3);
+		}
+
 		QByteArray eol;
-		QList<QByteArray> lines = splitLines(raw, &eol);
+		QList<QByteArray> lines = splitLines(body, &eol);
 
 		/* 备份，只在第一次改这个文件时做。固定名 .oledbak：
 		 * 带时间戳会堆一地文件，而重复点「接入」本来就几乎不改东西。 */
@@ -1046,7 +1088,7 @@ bool apply(const Scan &scan, QStringList *touched, QString *err)
 			}
 			return false;
 		}
-		out.write(joinLines(lines, eol));
+		out.write(bom + joinLines(lines, eol));
 		if (!out.commit())
 		{
 			if (err)

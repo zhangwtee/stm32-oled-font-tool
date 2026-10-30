@@ -68,8 +68,18 @@ int main(int argc, char *argv[])
 	expectPart("STM32F103ZE",    512);      /* ZET6k */
 	expectPart("STM32F103VET6",  512);
 	expectPart("STM32F407ZGT6", 1024);
-	expectPart("STM32G030C8T6",   64);      /* 4 位数字子系列 */
+	expectPart("STM32G030C8T6",   64);      /* G0 系列，子系列是 030 */
 	expectPart("STM32H743ZIT6", 2048);      /* I = 2MB */
+
+	/* 带字母的子系列。这几个都是真实型号，而老版正则要求子系列"纯数字"，
+	 * 于是 G0B1 / H7A3 / L4P5 全部解码失败退回 0 —— 不崩，但容量显示不出来，
+	 * 还会退到最后一步报"没找到工程文件"，和事实不符。
+	 * 子系列必须按定长 3 字收：写成变长贪婪的话，G0B1RET6 会把 "0B1R"
+	 * 整段吃进子系列，容量码取成 T（温度），反而错得更隐蔽。 */
+	expectPart("STM32G0B1RET6",  512);      /* R = 64pin，E = 512KB */
+	expectPart("STM32H7A3ZIT6", 2048);      /* Z = 144pin，I = 2MB */
+	expectPart("STM32L4P5ZGT6", 1024);      /* Z = 144pin，G = 1MB */
+
 	expectPart("GD32F103C8",       0);      /* 非 ST，不硬猜 */
 	expectPart("",                  0);
 

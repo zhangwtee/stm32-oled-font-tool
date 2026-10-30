@@ -64,6 +64,13 @@ int main(int argc, char **argv)
 	expectFile(dir, "sh1106_note.c",   ScreenProbe::SH1106);
 	expectFile(dir, "gbk_sh1106.c",    ScreenProbe::SH1106);
 
+	/* 注释里同时写「兼容 SSD1306 / SH1106」是很常见的做法。
+	 * 老版扫到这个文件时先看到 SH1106 就定案了，SSD1306 的屏会被判成 SH1106，
+	 * 列偏移变成 2，整幅画面往左错两像素。这份 fixture 两种型号都提到，
+	 * 但代码用的是 SSD1306 的列地址高低 4 位写法，所以应该按代码特征判 SSD1306。 */
+	std::printf("[两种型号都写到的驱动]\n");
+	expectFile(dir, "both_models.c",   ScreenProbe::SSD1306);
+
 	/* 注释里的 0x02 和 +2 不能当证据，否则这是最典型的误判 */
 	std::printf("[注释里的假线索不能上当]\n");
 	expectFile(dir, "comment_trap.c",  ScreenProbe::SSD1306);
