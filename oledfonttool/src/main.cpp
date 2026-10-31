@@ -857,10 +857,10 @@ QWidget *MainWindow::makeRepoLinks(QWidget *parent)
 	label->setTextInteractionFlags(Qt::TextBrowserInteraction);
 	label->setOpenExternalLinks(false);
 	label->setText(QStringLiteral(
-		"GitHub&nbsp;&nbsp;<a href=\"https://github.com/zhangruodong/stm32-oled-font-tool\">"
-		"github.com/zhangruodong/stm32-oled-font-tool</a><br>"
-		"Gitee&nbsp;&nbsp;<a href=\"https://gitee.com/jingliyanfeizuo/stm32-oled-font-tool\">"
-		"gitee.com/jingliyanfeizuo/stm32-oled-font-tool</a>"));
+		"GitHub&nbsp;&nbsp;<a href=\"https://github.com/zhangwtee\">"
+		"github.com/zhangwtee</a><br>"
+		"Gitee&nbsp;&nbsp;<a href=\"https://gitee.com/z_w_t\">"
+		"gitee.com/z_w_t</a>"));
 	QObject::connect(label, &QLabel::linkActivated, this,
 	                 [](const QString &link) { QDesktopServices::openUrl(QUrl(link)); });
 
