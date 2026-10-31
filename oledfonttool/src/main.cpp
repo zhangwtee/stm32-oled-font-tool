@@ -3187,10 +3187,12 @@ void MainWindow::updateStatus()
 	                  .arg(bytes)
 	                  .arg(QString::number(bytes / 1024.0, 'f', 1)));
 
-	/* 芯片那行：型号 + 容量 + 占比。
-	 * 以前这里写死「STM32F103C8T6 共 64KB Flash」，打开 512KB 的工程也在说 64KB。 */
+	/* 容量那行：只写容量 + 占比，不摆芯片型号。
+	 * 这工具不是只服务 STM32F103 —— 一行「STM32F103C8 · 64 KB」摆在状态栏上，
+	 * 看起来像「只认这个型号」。型号和它的来源都放在 tooltip 里，
+	 * 需要核对时鼠标一停就看得见，平时不占地方。
+	 * （容量本身照旧按工程读，换 512KB 的工程这里就是 512 KB。） */
 	const qint64 cap = flashCapacity();
-	const QString chip = m_chip.device.isEmpty() ? QStringLiteral("芯片未识别") : m_chip.device;
 
 	/* 没读到、又没手动选，就明说是按 64KB 估的，别让它看起来像真读到了 */
 	const bool guessed = (!m_chip.ok() && (m_flashBox ? m_flashBox->currentData().toInt() == 0 : true));
@@ -3198,14 +3200,12 @@ void MainWindow::updateStatus()
 	QString flash;
 	if (guessed)
 	{
-		flash = QStringLiteral("%1 · 按 64 KB 估 · 占 %2%")
-		            .arg(chip)
+		flash = QStringLiteral("Flash 按 64 KB 估 · 占 %1%")
 		            .arg(bytes * 100.0 / cap, 0, 'f', 1);
 	}
 	else
 	{
-		flash = QStringLiteral("%1 · %2 · 占 %3%")
-		            .arg(chip)
+		flash = QStringLiteral("Flash %1 · 占 %2%")
 		            .arg(ChipInfo::formatSize(cap))
 		            .arg(bytes * 100.0 / cap, 0, 'f', 1);
 	}
@@ -3216,7 +3216,14 @@ void MainWindow::updateStatus()
 		flash += QStringLiteral(" ⚠");
 	}
 	m_flashInfo->setText(flash);
-	m_flashInfo->setToolTip(m_chip.detail);
+
+	/* 型号从标签上撤下来了，但没丢：tooltip 第一行就是它 */
+	QString tip = m_chip.detail;
+	if (!m_chip.device.isEmpty())
+	{
+		tip = QStringLiteral("工程芯片：%1\n%2").arg(m_chip.device, m_chip.detail);
+	}
+	m_flashInfo->setToolTip(tip);
 }
 
 /* 从工程文件读 Flash 容量。换工程要重读 —— 这是唯一一个按工程变、
