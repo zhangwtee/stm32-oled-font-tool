@@ -2916,22 +2916,38 @@ void MainWindow::refreshPreview()
 	updateStatus();
 }
 
-/* QFont 在字体名不存在时会静默回退到默认字体，那样字形就不是你要的那个了 */
+/* QFont 在字体名不存在时会静默回退到默认字体，那样字形就不是你要的那个了。
+ *
+ * 第二种情况更隐蔽：名字是真的，字体也在，但它里面没有汉字字形
+ * （Arial、Consolas 这类西文字体，还有 Windows 上一批把样式名当家族名报出来的
+ *  "Bahnschrift SemiBold Condensed"）。Qt 会自己找宋体顶上，而且把 SemiBold
+ * 这个字重一起带过去 —— 16×16 取出来就是加粗的糊字。只看 family 名字的话，
+ * 这里会被判成"字体找到了"，界面上一点提示都没有。
+ * 所以改成问 FontGen：汉字最后是用哪套字体画的。 */
 void MainWindow::checkFontExists()
 {
-	const QFont f(m_fontBox->currentText());
-	QFontInfo info(f);
-	const bool exact = info.family().compare(m_fontBox->currentText(), Qt::CaseInsensitive) == 0;
-	if (exact)
+	const QString want = m_fontBox->currentText();
+	const QFontInfo info{QFont(want)};
+	const bool sameFamily = info.family().compare(want, Qt::CaseInsensitive) == 0;
+
+	if (sameFamily && !m_gen.cjkSubstituted())
 	{
 		m_fontWarn->setVisible(false);
+		return;
+	}
+
+	if (m_gen.cjkSubstituted())
+	{
+		m_fontWarn->setText(QStringLiteral("⚠「%1」里没有汉字字形，汉字实际用「%2」画，"
+		                                   "字形和这个字体不一样")
+		                        .arg(want, m_gen.cjkFamily()));
 	}
 	else
 	{
 		m_fontWarn->setText(QStringLiteral("⚠ 找不到「%1」，实际用的是「%2」，字形会不一样")
-		                    .arg(m_fontBox->currentText(), info.family()));
-		m_fontWarn->setVisible(true);
+		                        .arg(want, info.family()));
 	}
+	m_fontWarn->setVisible(true);
 }
 
 /*

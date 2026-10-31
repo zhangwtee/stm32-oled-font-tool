@@ -4,6 +4,7 @@
 #include <QImage>
 #include <QPainter>
 #include <QRegularExpression>
+#include <QRawFont>
 #include <QSet>
 #include <QStringConverter>
 #include <QTextStream>
@@ -18,6 +19,74 @@ FontGen::FontGen(const QFont &font, int threshold, int size)
 		m_font = QFont(QStringLiteral("SimSun"), m_size);   /* 和取模软件的"宋体 N"对应 */
 	}
 	m_font.setPixelSize(m_size);
+	resolveCjkFont();
+}
+
+/* 这套字体自己有没有这个字的字形。
+ * 用 QRawFont 而不是 QFontMetrics::inFont —— 后者会把 Qt 的"回退字体链"
+ * 也算成有，正好把要查的情况盖住。 */
+static bool fontHasChar(const QFont &f, QChar ch)
+{
+	const QRawFont raw = QRawFont::fromFont(f);
+	return raw.isValid() && raw.supportsCharacter(ch);
+}
+
+/*
+ * 决定汉字用哪套字体画。
+ *
+ * 起因：选 "Bahnschrift SemiBold Condensed"（或 Arial、Consolas 这类西文字体）
+ * 以后，取出来的点阵全是加粗的糊字。查下来 Qt 的处理是：
+ *
+ *     请求 Bahnschrift SemiBold Condensed  ->  原始字体 weight=600
+ *     它没有汉字  ->  Qt 回退到 SimSun，但 weight 还是 600  ->  宋体·加粗
+ *
+ * 16×16 的格子里，加粗宋体笔画两像素宽，相邻笔画连成一片，字就认不出来了。
+ *
+ * 所以：选中的字体自己就能画汉字，原样用（字重是用户选的，尊重）；
+ * 不能画，就换成一款确定含汉字的字体，并【把字重压回 Normal】。
+ */
+void FontGen::resolveCjkFont()
+{
+	/* 挑一个几乎每款中文字体都有的字来试探。用"嵌"而不是"一"，
+	 * 因为只有一根横的字，某些残缺字库也有。 */
+	const QChar probe(u'嵌');
+
+	if (fontHasChar(m_font, probe))
+	{
+		m_cjkFont = m_font;
+		m_cjkSubstituted = false;
+		return;
+	}
+
+	/* 按常见程度排，中文名在前 —— 界面上要原样显示这个家族名，
+	 * 「宋体」比「SimSun」更像给中文用户看的字。系统里没有中文名会退到下一个。 */
+	static const char *const cands[] = {
+		"宋体", "SimSun",
+		"黑体", "SimHei",
+		"微软雅黑", "Microsoft YaHei",
+		"等线", "DengXian",
+		"仿宋", "FangSong",
+		"楷体", "KaiTi",
+	};
+
+	for (const char *name : cands)
+	{
+		QFont f(QString::fromUtf8(name));
+		f.setPixelSize(m_size);
+		f.setWeight(QFont::Normal);      /* 这句是关键：不回退成加粗 */
+		if (fontHasChar(f, probe))
+		{
+			m_cjkFont = f;
+			m_cjkSubstituted = true;
+			return;
+		}
+	}
+
+	/* 一款中文字体都没有（理论上不可能），退回默认，至少别崩 */
+	m_cjkFont = QFont(QStringLiteral("SimSun"));
+	m_cjkFont.setPixelSize(m_size);
+	m_cjkFont.setWeight(QFont::Normal);
+	m_cjkSubstituted = true;
 }
 
 QString FontGen::tableName(int size)
@@ -29,6 +98,7 @@ void FontGen::setFont(const QFont &font)
 {
 	m_font = font;
 	m_font.setPixelSize(m_size);
+	resolveCjkFont();
 	m_cache.clear();
 }
 
@@ -42,6 +112,7 @@ void FontGen::setSize(int size)
 	}
 	m_size = size;
 	m_font.setPixelSize(m_size);
+	resolveCjkFont();               /* 字号变了，汉字字体的大小也得跟着变 */
 	m_cache.clear();
 }
 
@@ -66,7 +137,9 @@ QVector<QVector<bool>> FontGen::renderBits(QChar ch) const
 
 	QPainter p(&img);
 	p.setRenderHint(QPainter::TextAntialiasing, true);
-	p.setFont(m_font);
+	/* 汉字用 m_cjkFont（可能是替换过的那套），ASCII 还用用户选的字体：
+	 * 西文字体画字母本来是正常的，没必要一起换掉。 */
+	p.setFont(ch.unicode() < 0x80 ? m_font : m_cjkFont);
 	p.setPen(Qt::white);
 	p.drawText(QRect(0, 0, S, S), Qt::AlignLeft | Qt::AlignTop, QString(ch));
 	p.end();

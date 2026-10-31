@@ -17,6 +17,7 @@
 #include <QDir>
 #include <QFile>
 #include <QFileInfo>
+#include <QFontDatabase>
 #include <QGuiApplication>
 #include <QImageReader>
 #include <QRegularExpression>
@@ -942,6 +943,53 @@ int main(int argc, char **argv)
 		           .isEmpty());
 		/* 目标是个已存在的目录：open 必须失败，不能当"写成功" */
 		check("目标是目录时返回原因", !FontGen::writeTextFile(outDir, body).isEmpty());
+	}
+
+	/* ---------------- 字体里没有汉字的时候 ----------------
+	 * 选 "Bahnschrift SemiBold Condensed"（西文字体，以及 Windows 上那批
+	 * 把样式名当家族名报出来的字体）以后，点阵全是加粗的糊字。
+	 * 查下来是 Qt 的处理：字体里没有汉字 -> 回退到宋体，但把 weight=600
+	 * 一起带过去 -> 实际用「宋体·加粗」画 -> 16px 下笔画粘成一片。
+	 * 这里钉三件事：认出没有汉字、换上的字体字重是 Normal、点阵和正经宋体一致。 */
+	{
+		FontGen plain(QFont(QStringLiteral("SimSun"), 16), 110, 16);
+		check("宋体自己有汉字，不该被替换", !plain.cjkSubstituted(), plain.cjkFamily());
+		check("没替换时汉字字体就是选的那个",
+		      plain.cjkFamily().compare(QStringLiteral("SimSun"), Qt::CaseInsensitive) == 0,
+		      plain.cjkFamily());
+
+		/* Arial 每台 Windows 都有，且一定没有汉字 */
+		FontGen latin(QFont(QStringLiteral("Arial"), 16), 110, 16);
+		check("西文字体被认出「没有汉字」", latin.cjkSubstituted(), latin.cjkFamily());
+		check("换上的字体不是空的", !latin.cjkFamily().isEmpty(), latin.cjkFamily());
+		check("换上的字体字重是 Normal（不继承被选字体的字重）",
+		      latin.cjkFont().weight() == QFont::Normal,
+		      QString::number(static_cast<int>(latin.cjkFont().weight())));
+
+		const QVector<QVector<bool>> ref = plain.glyphBits(QChar(u'嵌'));
+		check("换字体后点阵和正经宋体逐格一致（不是加粗糊字）",
+		      latin.glyphBits(QChar(u'嵌')) == ref);
+
+		/* 用户报的就是这支：样式名当家族名、自带 weight=600。
+		 * 机器上没装就跳过，不硬失败。 */
+		const QString semiName = QStringLiteral("Bahnschrift SemiBold Condensed");
+		if (QFontDatabase::families().contains(semiName))
+		{
+			FontGen semi(QFont(semiName), 110, 16);
+			check("半粗体样式名也被认出没有汉字", semi.cjkSubstituted(), semi.cjkFamily());
+			check("半粗体也压回 Normal",
+			      semi.cjkFont().weight() == QFont::Normal,
+			      QString::number(static_cast<int>(semi.cjkFont().weight())));
+			check("半粗体的点阵同样和宋体一致", semi.glyphBits(QChar(u'嵌')) == ref);
+		}
+
+		/* 换字号后汉字字体的大小要跟着换，否则小字号用大像素画，整块被裁掉 */
+		FontGen small(QFont(QStringLiteral("Arial"), 16), 110, 16);
+		small.setSize(8);
+		check("换字号后汉字字体也跟着换到 8px",
+		      small.cjkFont().pixelSize() == 8,
+		      QString::number(small.cjkFont().pixelSize()));
+		check("8px 的点阵还是 8×8", small.glyphBits(QChar(u'嵌')).size() == 8);
 	}
 
 	std::printf("\n%d passed, %d failed\n", g_pass, g_fail);

@@ -47,6 +47,22 @@ public:
 	void setSize(int size);          /* 换字号：换字体像素大小 + 清缓存 */
 
 	QFont font() const { return m_font; }
+
+	/* 画汉字实际用的那套字体。
+	 *
+	 * 选中的字体可能压根没有汉字字形：西文字体（Arial / Consolas）是这样，
+	 * Windows 上还有一批「家族名其实是样式名」的，比如
+	 * "Bahnschrift SemiBold Condensed"、"Segoe UI Semilight"。
+	 * 这两种情况 Qt 都会自己找别的字体顶上，而且【把字重一起带过去】——
+	 * 上面那个 SemiBold 带过去以后，汉字是用「宋体 加粗」画的，
+	 * 16×16 下笔画全粘成一片，取出来的就是糊字。
+	 *
+	 * 所以这里不让 Qt 自己挑：主动检测 -> 明确指定一款含汉字的字体
+	 * -> 字重压回 Normal。界面上再把这件事告诉用户（见 MainWindow::checkFontExists）。 */
+	QFont cjkFont() const { return m_cjkFont; }
+	QString cjkFamily() const { return m_cjkFont.family(); }
+	bool cjkSubstituted() const { return m_cjkSubstituted; }
+
 	int threshold() const { return m_threshold; }
 	int size() const { return m_size; }
 	int glyphSize() const { return bytesFor(m_size); }   /* 一个字多少字节 */
@@ -83,7 +99,12 @@ public:
 private:
 	QVector<QVector<bool>> renderBits(QChar ch) const;
 
+	/* 按当前字体/字号重新判断"汉字该用哪套字体画" */
+	void resolveCjkFont();
+
 	QFont m_font;
+	QFont m_cjkFont;                 /* 画汉字用的；m_font 本身有汉字时就是它自己 */
+	bool  m_cjkSubstituted = false;  /* true = 选了字体但没有汉字，已换成别的 */
 	int m_threshold;
 	int m_size;
 	mutable QMap<QChar, QVector<QVector<bool>>> m_cache;   /* const 成员函数里也能写缓存 */
