@@ -10,9 +10,9 @@
 ; ============================================================================
 
 #define MyAppName        "OLED 点阵取模工具"
-#define MyAppVersion     "1.2"
-#define MyAppPublisher   "zhangruodong"
-#define MyAppURL         "https://github.com/zhangruodong/stm32-oled-font-tool"
+#define MyAppVersion     "1.3"
+#define MyAppPublisher   "zhangwtee"
+#define MyAppURL         "https://github.com/zhangwtee/stm32-oled-font-tool"
 #define MyAppExeName     "oledmatrix.exe"
 
 ; package 目录的位置（相对本 .iss 文件）

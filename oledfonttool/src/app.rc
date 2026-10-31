@@ -17,8 +17,8 @@
 
 /* 版本号要和 installer\oledfonttool.iss 里的 MyAppVersion 保持一致 */
 VS_VERSION_INFO VERSIONINFO
-FILEVERSION     1,2,0,0
-PRODUCTVERSION  1,2,0,0
+FILEVERSION     1,3,0,0
+PRODUCTVERSION  1,3,0,0
 FILEFLAGSMASK   0x3fL
 #ifdef _DEBUG
 FILEFLAGS       0x1L
@@ -34,14 +34,14 @@ BEGIN
         /* 080404b0 = 中文(简体, 0x0804) + Unicode(0x04b0) */
         BLOCK "080404b0"
         BEGIN
-            VALUE "CompanyName",      "zhangruodong"
+            VALUE "CompanyName",      "zhangwtee"
             VALUE "FileDescription",  "OLED 点阵取模工具"
-            VALUE "FileVersion",      "1.2"
+            VALUE "FileVersion",      "1.3"
             VALUE "InternalName",     "oledmatrix"
-            VALUE "LegalCopyright",   "Copyright (C) 2026 zhangruodong"
+            VALUE "LegalCopyright",   "Copyright (C) 2026 zhangwtee"
             VALUE "OriginalFilename", "oledmatrix.exe"
             VALUE "ProductName",      "OLED 点阵取模工具"
-            VALUE "ProductVersion",   "1.2"
+            VALUE "ProductVersion",   "1.3"
         END
     END
     BLOCK "VarFileInfo"
