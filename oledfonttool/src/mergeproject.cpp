@@ -196,6 +196,70 @@ static QString decodeFrom(const QByteArray &b, Enc e)
 	return s;
 }
 
+/* QString -> C 字符串字面量的"内容"部分，让源码里不出现中文字节。
+ *
+ * 为什么非要这么绕：armcc（Keil AC5）不看内容判编码，一律按系统代码页（GBK）
+ * 当双字节解析。汉字的 UTF-8 三字节最后一位常落在 GBK 的引导字节区间，
+ * 会把紧随其后的引号当成第二字节吞掉 -> #8: missing closing quote。
+ * 给文件加 BOM 能让 armcc 改按 UTF-8 读，可 **Keil 的编辑器保存时会把 BOM 去掉**
+ * （实测：在 Keil 里把那行坐标从 (1,1) 改成 (3,4) 存一下，BOM 就没了，
+ * 编译立刻报 #8）。所以光靠补 BOM 是治不住的 ——
+ * 只要写进去的源码里根本没有中文字节，BOM 丢不丢都无所谓。
+ *
+ * 纯 ASCII 原样返回（"AB" 没必要写成 "\x41\x42"）；有中文就逐字节转义。 */
+static QString cStringInner(const QString &s)
+{
+	const QByteArray u8 = s.toUtf8();
+	bool nonAscii = false;
+	for (const char c : u8)
+	{
+		if (static_cast<unsigned char>(c) > 127)
+		{
+			nonAscii = true;
+			break;
+		}
+	}
+	if (!nonAscii)
+	{
+		return s;
+	}
+
+	QString out;
+	bool prevHex = false;
+	for (const char ch : u8)
+	{
+		const unsigned char c = static_cast<unsigned char>(ch);
+		if (c < 0x80)
+		{
+			/* \x 会把后面能当十六进制读的字符一起吞掉： "\xA0B" 是 0xA0B，
+			 * 不是 0xA0 + 'B'。遇到这种情况先断开字符串（C 的相邻字面量会拼接）。 */
+			const bool hex = (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f')
+			                 || (c >= 'A' && c <= 'F');
+			if (prevHex && hex)
+			{
+				out += QStringLiteral("\"\"");
+			}
+			if (c == '"' || c == '\\')
+			{
+				out += QLatin1Char('\\');
+			}
+			out += QLatin1Char(static_cast<char>(c));
+			prevHex = false;
+		}
+		else
+		{
+			QString h = QString::number(c, 16).toUpper();
+			if (h.size() < 2)
+			{
+				h.prepend(QLatin1Char('0'));
+			}
+			out += QStringLiteral("\\x") + h;
+			prevHex = true;
+		}
+	}
+	return out;
+}
+
 /*
  * 切成行（保留原行尾风格）。返回的每行都不含 \r\n。
  *
@@ -992,11 +1056,16 @@ bool detect(const QString &fontHeaderPath,
 
 			if (!hasCall && !sample1.isEmpty() && initLn > 0)
 			{
+				/* 示例串按 \xE5\xBC\xA0 这种字节转义写进去，源码里不留中文字节。
+				 * 屏幕效果一模一样，但 Keil 保存时把 BOM 弄丢也不会报 #8
+				 * （详见 cStringInner 的注释）。 */
 				QStringList body;
-				body << QStringLiteral("\tOLED_CFont_ShowString( 1, 1, \"%1\" );").arg(sample1);
+				body << QStringLiteral("\tOLED_CFont_ShowString( 1, 1, \"%1\" );")
+				            .arg(cStringInner(sample1));
 				if (!sample2.isEmpty())
 				{
-					body << QStringLiteral("\tOLED_CFont_ShowString( 2, 1, \"%1\" );").arg(sample2);
+					body << QStringLiteral("\tOLED_CFont_ShowString( 2, 1, \"%1\" );")
+					            .arg(cStringInner(sample2));
 				}
 
 				Step s;
@@ -1004,11 +1073,20 @@ bool detect(const QString &fontHeaderPath,
 				s.afterLine = initLn;
 				s.text      = body.join(QLatin1Char('\n'));
 				s.title     = QStringLiteral("%1：补 %2 行示例调用").arg(mainName).arg(body.size());
+				QString shown;
+				if (cStringInner(sample1) != sample1)
+				{
+					shown = QStringLiteral("示例串在源码里写成 \"%1\" 这种字节转义，"
+					                       "屏幕上显示的还是「%2」。这样写源码里没有中文字节，"
+					                       "Keil 保存时把 BOM 弄丢也不会报 #8。")
+					            .arg(cStringInner(sample1), sample1);
+				}
 				s.detail    = QStringLiteral("加在 %1(); 之后（第 %2 行后）。"
 				                             "如果下面还有别的 OLED_ShowXxx 会覆盖同一行，"
-				                             "把多余的删掉即可。")
+				                             "把多余的删掉即可。\n%3")
 				                  .arg(initFunc)
-				                  .arg(initLn);
+				                  .arg(initLn)
+				                  .arg(shown);
 				out->steps << s;
 			}
 			else if (hasCall)

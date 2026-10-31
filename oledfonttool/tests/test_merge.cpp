@@ -189,6 +189,86 @@ int main(int argc, char **argv)
 		      QStringLiteral("长度 %1 -> %2").arg(mainBytes.size()).arg(back.size()));
 	}
 
+	std::printf("[示例串按字节转义，源码里不留中文]\n");
+	{
+		/* 现场：Keil 里 Edit → Configuration → Encoding 选 UTF-8，保存出来的
+		 * 文件不带 BOM；在 Keil 里改一下示例行的坐标再存，连原来补好的 BOM
+		 * 也会被去掉。带中文的字符串字面量这种文件 armcc 按 GBK 解析，
+		 * 汉字三字节的最后一字节把引号吞掉 -> #8: missing closing quote。
+		 * 所以示例串一律写成 "\xE5\xBC\xA0" 这种字节转义：
+		 * 屏幕上的字节还是 UTF-8 三字节，但源码里一个中文字节都没有，
+		 * BOM 丢不丢都不影响编译。 */
+		const QString bak = mainC + QStringLiteral(".oledbak");
+		QFile::remove(bak);
+		/* 用「Keil 存出来的样子」——没有 BOM —— 做底稿，
+		 * 这样才能验证"写回去也不会平白多出 BOM" */
+		QByteArray plainNoBom = mainBytes;
+		plainNoBom.remove(0, 3);
+		writeFile(mainC, plainNoBom);
+
+		MergeProject::Scan scan;
+		const bool ok = MergeProject::detect(fontH, QStringLiteral("张"),
+		                                     QStringLiteral("李"), &scan);
+		check("detect 成功（带中文示例）", ok, scan.error);
+
+		QString sampleStep;
+		for (const MergeProject::Step &s : scan.steps)
+		{
+			if (s.text.contains(QLatin1String("OLED_CFont_ShowString")))
+			{
+				sampleStep = s.text;
+				break;
+			}
+		}
+		check("找到了示例行", !sampleStep.isEmpty(), sampleStep);
+
+		bool asciiOnly = true;
+		for (const QChar &c : sampleStep)
+		{
+			if (c.unicode() > 127) { asciiOnly = false; break; }
+		}
+		check("示例行全是 ASCII", asciiOnly, sampleStep);
+		check("「张」写成了 \\xE5\\xBC\\xA0",
+		      sampleStep.contains(QLatin1String("\"\\xE5\\xBC\\xA0\"")), sampleStep);
+		check("「李」写成了 \\xE6\\x9D\\x8E",
+		      sampleStep.contains(QLatin1String("\"\\xE6\\x9D\\x8E\"")), sampleStep);
+
+		QStringList touched;
+		QString err;
+		check("apply 成功", MergeProject::apply(scan, &touched, &err), err);
+
+		/* 落盘后文件必须是纯 ASCII（BOM 都不该补），但程序里的字符串字节不变 */
+		const QByteArray after = readFile(mainC);
+		bool fileAscii = true;
+		for (const char ch : after)
+		{
+			if (static_cast<unsigned char>(ch) > 127) { fileAscii = false; break; }
+		}
+		check("写回后 main.c 里没有非 ASCII 字节", fileAscii,
+		      QStringLiteral("长度 %1").arg(after.size()));
+		check("纯 ASCII 文件不加 BOM", !after.startsWith("\xEF\xBB\xBF"),
+		      QString::fromLatin1(after.left(6).toHex(' ')));
+		check("转义后仍是 E5 BC A0 这段文本",
+		      after.contains("\\xE5\\xBC\\xA0"), QString::fromUtf8(after.left(200)));
+
+		/* 中文后面紧跟十六进制字符是转义的天敌："\xA0B" 会被读成 0xA0B，
+		 * 必须先把字符串断开。这里用「张A」把这条钉死。 */
+		writeFile(mainC, plainNoBom);       /* 上一轮已经写进示例行，先还原 */
+		MergeProject::Scan s3;
+		const bool ok3 = MergeProject::detect(fontH, QStringLiteral("张A"), QString(), &s3);
+		QString step3;
+		for (const MergeProject::Step &s : s3.steps)
+		{
+			if (s.text.contains(QLatin1String("OLED_CFont_ShowString"))) step3 = s.text;
+		}
+		check("detect 成功（中文后面跟 ASCII）", ok3, s3.error);
+		check("转义后紧跟 hex 字符时断开字符串",
+		      step3.contains(QLatin1String("\"\\xE5\\xBC\\xA0\"\"A\"")), step3);
+
+		QFile::remove(bak);
+		writeFile(mainC, mainBytes);
+	}
+
 	std::printf("[撤销的边界]\n");
 	{
 		/* (a) 目标文件被人删了、只剩备份。
