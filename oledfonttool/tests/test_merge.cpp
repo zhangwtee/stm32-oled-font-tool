@@ -385,6 +385,58 @@ int main(int argc, char **argv)
 		check("空串没有分段", MergeProject::cLiteralLines(QString(), 30).isEmpty(), QString());
 	}
 
+	std::printf("[行宽溢出下标]\n");
+	{
+		/* firstOverflowIndex 直接对应驱动 ShowGlyph 的静默 return：
+		 * 累加值一超过屏宽，那个字就显示不出来。这里把边界钉死。 */
+
+		/* 16×16，屏宽 128：恰好 8 个汉字填满（8×16=128），第 9 个溢出 */
+		QString eight;
+		for (int i = 0; i < 8; ++i)
+		{
+			eight += QChar(0x4E00 + i);
+		}
+		check("8 个汉字恰好放得下", MergeProject::firstOverflowIndex(eight, 16, 128) == -1,
+		      QString::number(MergeProject::firstOverflowIndex(eight, 16, 128)));
+
+		QString nine = eight + QChar(0x4E09);
+		check("第 9 个汉字是第一个溢出的", MergeProject::firstOverflowIndex(nine, 16, 128) == 8,
+		      QString::number(MergeProject::firstOverflowIndex(nine, 16, 128)));
+
+		/* ASCII 占 8 像素：16 个 ASCII 填满 128，第 17 个溢出 */
+		const QString ascii16 = QStringLiteral("0123456789ABCDEF");
+		check("16 个 ASCII 恰好放得下",
+		      MergeProject::firstOverflowIndex(ascii16, 16, 128) == -1,
+		      QString::number(MergeProject::firstOverflowIndex(ascii16, 16, 128)));
+		check("第 17 个 ASCII 溢出",
+		      MergeProject::firstOverflowIndex(ascii16 + QStringLiteral("G"), 16, 128) == 16,
+		      QString::number(MergeProject::firstOverflowIndex(ascii16 + QStringLiteral("G"), 16, 128)));
+
+		/* 中英混排：7 个汉字(112) + 2 个 ASCII(16) = 128，恰好；再加一个字溢出 */
+		QString seven;
+		for (int i = 0; i < 7; ++i)
+		{
+			seven += QChar(0x4E00 + i);
+		}
+		const QString mixOk = seven + QStringLiteral("AB");
+		check("7 汉字 + 2 英文 = 128 恰好",
+		      MergeProject::firstOverflowIndex(mixOk, 16, 128) == -1,
+		      QString::number(MergeProject::firstOverflowIndex(mixOk, 16, 128)));
+		check("再加 1 汉字溢出", MergeProject::firstOverflowIndex(mixOk + QChar(0x4E09), 16, 128) == 9,
+		      QString::number(MergeProject::firstOverflowIndex(mixOk + QChar(0x4E09), 16, 128)));
+
+		/* 24×24：5 个汉字 120，第 6 个溢出 */
+		QString five;
+		for (int i = 0; i < 5; ++i)
+		{
+			five += QChar(0x4E00 + i);
+		}
+		check("24×24 放 5 个", MergeProject::firstOverflowIndex(five, 24, 128) == -1,
+		      QString::number(MergeProject::firstOverflowIndex(five, 24, 128)));
+		check("24×24 第 6 个溢出", MergeProject::firstOverflowIndex(five + QChar(0x4E09), 24, 128) == 5,
+		      QString::number(MergeProject::firstOverflowIndex(five + QChar(0x4E09), 24, 128)));
+	}
+
 	std::printf("[撤销的边界]\n");
 	{
 		/* (a) 目标文件被人删了、只剩备份。

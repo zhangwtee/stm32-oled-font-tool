@@ -1696,4 +1696,18 @@ QStringList cLiteralLines(const QString &text, int firstCol, int indent, int max
 	return lines;
 }
 
+int firstOverflowIndex(const QString &text, int glyphW, int screenW)
+{
+	int x = 0;
+	for (int i = 0; i < text.size(); ++i)
+	{
+		x += (text.at(i).unicode() > 0x7F) ? glyphW : 8;
+		if (x > screenW)
+		{
+			return i;
+		}
+	}
+	return -1;
+}
+
 }   // namespace MergeProject

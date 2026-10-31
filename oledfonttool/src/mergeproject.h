@@ -158,6 +158,16 @@ QString cStringOf(const QString &text);
 QStringList cLiteralLines(const QString &text, int firstCol, int indent = 4,
                           int maxCols = 80);
 
+/*
+ * 一行文字在屏上第一个放不下的字的下标（从 0 起），放得下返回 -1。
+ *
+ * 屏上宽度逐字累加：非 ASCII（汉字）前进 glyphW 像素，ASCII 前进 8 像素，
+ * 和驱动 ShowString 里的 xPixel 累加完全一致。累加值超过 screenW 的那一个字
+ * 就是第一个被 ShowGlyph 静默跳过的字 —— 编译通过、屏幕不显示，所以要在
+ * 复制时提前提醒，别让用户烧完才发现行尾缺字。
+ */
+int firstOverflowIndex(const QString &text, int glyphW, int screenW);
+
 }   // namespace MergeProject
 
 #endif   // MERGEPROJECT_H

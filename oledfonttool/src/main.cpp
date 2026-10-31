@@ -626,6 +626,7 @@ static const char *kQss =
 	"QMainWindow, QSplitter { background: #FFFFFF; }"
 	"#SidePanel { background: #FAFBFC; border-right: 1px solid #E4E7EB; }"
 	"#Title { color: #1F2328; font-size: 16px; font-weight: 600; }"
+	"#Purpose { color: #374151; font-size: 12px; }"
 	"#SubTitle, #Hint { color: #6B7280; font-size: 11px; }"
 	"#Count { color: #1F6FEB; font-size: 12px; font-weight: 600; }"
 	"#Warn { color: #B45309; background: #FEF3C7; border: 1px solid #FDE68A;"
@@ -860,9 +861,19 @@ void MainWindow::buildUi()
 
 	QLabel *title = new QLabel(QStringLiteral("OLED 点阵取模工具"), side);
 	title->setObjectName(QStringLiteral("Title"));
+
+	/* 一句用途说明：告诉第一次打开的人这工具是干嘛的。
+	 * 放在标题和参数副标题之间，技术参数那行归 updateSubTitle 管。 */
+	QLabel *purpose = new QLabel(
+	        QStringLiteral("把汉字、图形转成 OLED 屏要的取模数据，生成可直接编译的字库"),
+	        side);
+	purpose->setObjectName(QStringLiteral("Purpose"));
+	purpose->setWordWrap(true);
+
 	m_subTitle = new QLabel(side);
 	m_subTitle->setObjectName(QStringLiteral("SubTitle"));
 	sideLayout->addWidget(title);
+	sideLayout->addWidget(purpose);
 	sideLayout->addWidget(m_subTitle);
 
 	/* 四个分组叠起来比 1080p 还高一点，窗口一缩小最下面的按钮就掉出去了。
@@ -4158,7 +4169,14 @@ void MainWindow::copyAsCString()
 	const QStringList rows = raw.split(QRegularExpression(QStringLiteral("[\r\n]+")),
 	                                   Qt::SkipEmptyParts);
 
+	/* 屏宽写死 128（CF_SCREEN_W），一个汉字占 m_gen.size() 像素、ASCII 占 8 像素。
+	 * 驱动 ShowGlyph 里 xPixel + 字宽 > 128 就静默 return，所以超宽的字
+	 * 编译通过、屏幕不显示，得在复制时提醒。 */
+	const int screenW = 128;
+	const int glyphW  = qMax(8, m_gen.size());
+
 	QStringList code;
+	QVector<int> overflowAt;      /* 和 code 一一对应：放不下时记第一个溢出的字下标 */
 	int line = 1;
 	for (const QString &r : rows)
 	{
@@ -4167,6 +4185,8 @@ void MainWindow::copyAsCString()
 		{
 			continue;               /* 空行不占屏上的行号 */
 		}
+
+		overflowAt.append(MergeProject::firstOverflowIndex(t, glyphW, screenW));
 
 		/* 每个字的转义后面紧跟它自己的汉字，折行由 cLiteralLines 按列宽算。
 		 * 不再用行尾「// 原文」：一串 17 个汉字转义出来两百多字符，注释
@@ -4217,6 +4237,26 @@ void MainWindow::copyAsCString()
 
 	QString msg = QStringLiteral("已复制 %1 句（中文写成 \\x 转义，粘进 main.c 即可）")
 	                  .arg(static_cast<int>(code.size()));
+
+	/* 行宽超了也提醒：超宽的字在 ShowGlyph 里被静默跳过，编译通过、屏幕不显示，
+	 * 比行数超了更隐蔽（行数超了整行不写，行宽超了是行尾缺几个字）。 */
+	QStringList wide;
+	for (int i = 0; i < code.size() && i < overflowAt.size(); ++i)
+	{
+		if (overflowAt.at(i) >= 0)
+		{
+			wide << QStringLiteral("第 %1 行").arg(i + 1);
+		}
+	}
+	if (!wide.isEmpty())
+	{
+		msg += QStringLiteral("。%1超出屏宽（%2×%2 的字一行最多 %3 个），"
+		                      "行尾多出来的字不会显示")
+		           .arg(wide.join(QStringLiteral("、")))
+		           .arg(m_gen.size())
+		           .arg(screenW / glyphW);
+	}
+
 	if (code.size() > maxLine)
 	{
 		msg += QStringLiteral("。注意 %1×%1 的字在这块 %2 像素高的屏上只放得下 %3 行，"
