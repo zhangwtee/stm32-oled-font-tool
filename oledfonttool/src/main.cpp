@@ -677,6 +677,9 @@ private:
 
 	void buildUi();
 	void updateStatus();
+	/* 侧栏副标题跟着「取反」开关变：勾上以后屏上是亮底暗字，
+	 * 再挂「阴码」两个字就自相矛盾了。 */
+	void updateSubTitle();
 	void checkFontExists();
 	void checkSourceEncoding(bool popupOnProblem);
 	void writeEncodingLog(const QStringList &lines) const;
@@ -743,6 +746,7 @@ private:
 	QPlainTextEdit *m_text;
 	QComboBox *m_fontBox;
 	QComboBox *m_sizeBox;           /* 点阵字号 16 / 24 / 32 */
+	QLabel *m_subTitle;             /* 副标题：随取反开关在「阴码 / 反白」之间切 */
 	QLabel *m_fontWarn;
 	QSlider *m_threshold;
 	QLabel *m_thresholdValue;
@@ -837,10 +841,10 @@ void MainWindow::buildUi()
 
 	QLabel *title = new QLabel(QStringLiteral("OLED 点阵取模工具"), side);
 	title->setObjectName(QStringLiteral("Title"));
-	QLabel *subTitle = new QLabel(QStringLiteral("阴码 · 列行式 · 低位在前 · 字号可选"), side);
-	subTitle->setObjectName(QStringLiteral("SubTitle"));
+	m_subTitle = new QLabel(side);
+	m_subTitle->setObjectName(QStringLiteral("SubTitle"));
 	sideLayout->addWidget(title);
-	sideLayout->addWidget(subTitle);
+	sideLayout->addWidget(m_subTitle);
 
 	/* 四个分组叠起来比 1080p 还高一点，窗口一缩小最下面的按钮就掉出去了。
 	 * 所以中间这一段放滚动区；编码状态和字数统计固定在底部，不跟着滚。 */
@@ -2952,6 +2956,7 @@ void MainWindow::refreshPreview()
 	m_gen.setThreshold(m_threshold->value());
 	m_gen.setInvert(m_invert->isChecked());
 
+	updateSubTitle();
 	checkFontExists();
 	m_preview->setText(m_text->toPlainText());
 	updateStatus();
@@ -3222,6 +3227,42 @@ int MainWindow::currentScreenH() const
 {
 	const int h = m_screenHBox ? m_screenHBox->currentData().toInt() : 64;
 	return (h == 32) ? 32 : 64;
+}
+
+/*
+ * 副标题跟着「取反」开关走。
+ *
+ * 「阴码」说的是数据位 1 对应点亮的像素。勾了取反以后，亮的像素全反到了背景上，
+ * 屏上是白底黑字 —— 这时候还挂「阴码」两个字就是自相矛盾，用户看到文件头里
+ * 写「已取反」也会犯嘀咕。所以这一格换成「反白」。
+ *
+ * 另外三项（列行式 / 低位在前 / 字号）跟取反没有关系，取反只对调每一位的值，
+ * 不改排列方式和位序，原样留着。
+ *
+ * setText 前先比一次：refreshPreview 每次敲键盘都会调到这儿，
+ * 文字没变还调 setText 会让 QLabel 重新算布局，闪一下。
+ */
+void MainWindow::updateSubTitle()
+{
+	if (!m_subTitle)
+	{
+		return;
+	}
+
+	const bool inv = (m_invert && m_invert->isChecked());
+	const QString want = inv
+	        ? QStringLiteral("反白 · 列行式 · 低位在前 · 字号可选")
+	        : QStringLiteral("阴码 · 列行式 · 低位在前 · 字号可选");
+
+	if (m_subTitle->text() != want)
+	{
+		m_subTitle->setText(want);
+	}
+
+	m_subTitle->setToolTip(inv
+	        ? QStringLiteral("已取反：数据位对调，屏上是亮底暗字（反白）。\n"
+	                         "「列行式」「低位在前」不受取反影响。")
+	        : QString());
 }
 
 void MainWindow::updateStatus()
