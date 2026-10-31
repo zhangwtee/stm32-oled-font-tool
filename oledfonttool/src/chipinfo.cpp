@@ -1,3 +1,10 @@
+/*==============================================================================
+ *  chipinfo.cpp  ——  芯片 Flash 容量读取
+ *
+ *  作者   zhangwtee
+ *  GitHub https://github.com/zhangwtee
+ *  Gitee  https://gitee.com/z_w_t
+ *==============================================================================*/
 #include "chipinfo.h"
 
 #include <QDir>

@@ -1,3 +1,10 @@
+/*==============================================================================
+ *  imagepreview.h  ——  动画帧预览控件（接口）
+ *
+ *  作者   zhangwtee
+ *  GitHub https://github.com/zhangwtee
+ *  Gitee  https://gitee.com/z_w_t
+ *==============================================================================*/
 #ifndef IMAGEPREVIEW_H
 #define IMAGEPREVIEW_H
 

@@ -1,3 +1,10 @@
+/*==============================================================================
+ *  fontpreview.cpp  ——  点阵实时预览控件
+ *
+ *  作者   zhangwtee
+ *  GitHub https://github.com/zhangwtee
+ *  Gitee  https://gitee.com/z_w_t
+ *==============================================================================*/
 #include "fontpreview.h"
 
 #include <QPainter>

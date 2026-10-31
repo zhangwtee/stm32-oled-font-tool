@@ -1,3 +1,10 @@
+/*==============================================================================
+ *  imagegen.h  ——  图片 / 动画取模（接口）
+ *
+ *  作者   zhangwtee
+ *  GitHub https://github.com/zhangwtee
+ *  Gitee  https://gitee.com/z_w_t
+ *==============================================================================*/
 #ifndef IMAGEGEN_H
 #define IMAGEGEN_H
 

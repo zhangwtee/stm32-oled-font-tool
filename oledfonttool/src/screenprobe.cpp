@@ -1,3 +1,10 @@
+/*==============================================================================
+ *  screenprobe.cpp  ——  屏控制器探测（SSD1306 / SH1106）
+ *
+ *  作者   zhangwtee
+ *  GitHub https://github.com/zhangwtee
+ *  Gitee  https://gitee.com/z_w_t
+ *==============================================================================*/
 #include "screenprobe.h"
 
 #include "mergeproject.h"

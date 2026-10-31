@@ -1,3 +1,10 @@
+/*==============================================================================
+ *  fontgen.h  ——  汉字点阵渲染与编码（接口）
+ *
+ *  作者   zhangwtee
+ *  GitHub https://github.com/zhangwtee
+ *  Gitee  https://gitee.com/z_w_t
+ *==============================================================================*/
 #ifndef FONTGEN_H
 #define FONTGEN_H
 

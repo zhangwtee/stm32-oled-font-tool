@@ -1,3 +1,10 @@
+/*==============================================================================
+ *  imagegen.cpp  ——  图片 / 动画二值化成点阵并导出
+ *
+ *  作者   zhangwtee
+ *  GitHub https://github.com/zhangwtee
+ *  Gitee  https://gitee.com/z_w_t
+ *==============================================================================*/
 #include "imagegen.h"
 
 #include <QCollator>

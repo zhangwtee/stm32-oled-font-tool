@@ -1,3 +1,10 @@
+/*==============================================================================
+ *  mergeproject.cpp  ——  一键接入工程：把字库用法写进用户工程
+ *
+ *  作者   zhangwtee
+ *  GitHub https://github.com/zhangwtee
+ *  Gitee  https://gitee.com/z_w_t
+ *==============================================================================*/
 #include "mergeproject.h"
 
 #include <QDir>

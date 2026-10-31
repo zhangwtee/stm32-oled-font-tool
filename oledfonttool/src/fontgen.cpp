@@ -1,3 +1,10 @@
+/*==============================================================================
+ *  fontgen.cpp  ——  汉字渲染成 N×N 点阵并编码成 OLED 字节
+ *
+ *  作者   zhangwtee
+ *  GitHub https://github.com/zhangwtee
+ *  Gitee  https://gitee.com/z_w_t
+ *==============================================================================*/
 #include "fontgen.h"
 
 #include <QFile>

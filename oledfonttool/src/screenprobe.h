@@ -1,3 +1,10 @@
+/*==============================================================================
+ *  screenprobe.h  ——  屏控制器探测（接口）
+ *
+ *  作者   zhangwtee
+ *  GitHub https://github.com/zhangwtee
+ *  Gitee  https://gitee.com/z_w_t
+ *==============================================================================*/
 #ifndef SCREENPROBE_H
 #define SCREENPROBE_H
 
