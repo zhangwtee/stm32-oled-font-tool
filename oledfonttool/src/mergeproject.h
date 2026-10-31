@@ -129,6 +129,35 @@ SrcIssue judgeSource(const QByteArray &raw, bool hasNonAsciiLiteral);
  */
 QString cStringOf(const QString &text);
 
+/*
+ * 生成「每个字的转义后面紧跟自己那个汉字」的字面量分段，并按列宽折行。
+ *
+ * 输出形如（firstCol 传调用语句前缀的长度，续行缩进 indent 个空格）——
+ * 下面是每一段的示意，每段都是「一个带引号的字面量」紧跟「一个块注释」，
+ * 注释内容就是那个字：
+ *
+ *      字面量 "\xE5\xBC\xA0"   紧跟块注释  张
+ *      字面量 "\xE6\xB8\xA9"   紧跟块注释  温
+ *
+ * （这里不写完整的示例代码，因为块注释的结束符会提前终结本段注释。）
+ *
+ * 为什么要一段一注释：一整串 17 个汉字转义出来有 200 多个字符，行尾的
+ * 「// 原文」离得太远，在编辑器里换了行就看不见对应关系，改一个字节
+ * 全靠数。拆成「字面量 + 紧跟注释」后，相邻字面量由编译器自动拼接，
+ * 生成的字节和 cStringOf(整串) 完全一致。
+ *
+ * 连续 ASCII 合成一段、不加注释（"Num:" 要是拆成 N、u、m、: 四个注释
+ * 纯属噪音）。
+ *
+ * 注释里汉字**前后各留一个空格**：一是和字库头文件里那种「块注释 + 汉字 +
+ * 块注释」的写法保持一致，二是 armcc 按 GBK 双字节解析这些字节时，汉字
+ * 第三个字节会去配它后面那个字节 —— 配空格最无害。实测 AC5.06u5 去掉
+ * 空格也能编过（'*' 是 0x2A，不在 GBK 尾字节允许的区间里，吞不到注释
+ * 结束符），但没必要去赌别的编译器。
+ */
+QStringList cLiteralLines(const QString &text, int firstCol, int indent = 4,
+                          int maxCols = 80);
+
 }   // namespace MergeProject
 
 #endif   // MERGEPROJECT_H

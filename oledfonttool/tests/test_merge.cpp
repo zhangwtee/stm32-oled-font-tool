@@ -295,6 +295,96 @@ int main(int argc, char **argv)
 		}
 	}
 
+	std::printf("[字面量分段：汉字紧跟注释]\n");
+	{
+		/* cLiteralLines 的输出会被原样粘进 main.c，所以这里要钉死三件事：
+		 * (1) 相邻字面量拼起来必须等于 cStringOf(整串) —— 拆段不能改变字节；
+		 * (2) 注释里汉字前后都有空格 —— armcc 按 GBK 读时汉字第三字节会
+		 *     落单吞掉后一字节，吞空格没事，吞掉 '*' 注释就永不结束；
+		 * (3) 折行后每行不超过 maxCols，续行缩进 indent 个空格。 */
+
+		/* 把 "..." 里的内容抠出来，跳过多行里的空白与注释 */
+		auto litsJoined = [](const QStringList &lines) {
+			QString all;
+			for (const QString &ln : lines)
+			{
+				int i = 0;
+				while (i < ln.size())
+				{
+					if (ln.at(i) != QLatin1Char('"'))
+					{
+						++i;
+						continue;
+					}
+					++i;
+					while (i < ln.size() && ln.at(i) != QLatin1Char('"'))
+					{
+						if (ln.at(i) == QLatin1Char('\\') && i + 1 < ln.size())
+						{
+							all += ln.at(i);        /* 转义符和它保护的那个字符都算 */
+							++i;
+						}
+						all += ln.at(i);
+						++i;
+					}
+					++i;
+				}
+			}
+			return all;
+		};
+
+		const QString cn = QString::fromUtf8("\xE5\xBC\xA0" "\xE6\xB8\xA9");
+
+		const QStringList one = MergeProject::cLiteralLines(cn, 30);
+		check("两个汉字有两段", one.size() == 1, QString::number(one.size()));
+		check("首段是「张」的转义", one.value(0).contains(QStringLiteral("\"\\xE5\\xBC\\xA0\"")),
+		      one.value(0));
+		check("后面紧跟汉字注释", one.value(0).contains(QStringLiteral("/* ") + QString::fromUtf8("\xE5\xBC\xA0") + QStringLiteral(" */")),
+		      one.value(0));
+		check("注释里汉字两侧有空格", 
+		      !one.value(0).contains(QStringLiteral("/*") + QString::fromUtf8("\xE5\xBC\xA0")), one.value(0));
+
+		/* 纯 ASCII：一段，不带注释 */
+		const QStringList plain = MergeProject::cLiteralLines(QStringLiteral("Num:"), 30);
+		check("纯 ASCII 只有一段", plain.size() == 1, plain.join(QLatin1Char('|')));
+		check("纯 ASCII 不加注释", !plain.value(0).contains(QStringLiteral("/*")), plain.value(0));
+
+		/* 中英混排：ASCII 合成一段，汉字各一段，拼接后字节不变 */
+		const QString mixed = QStringLiteral("T=") + cn;
+		const QStringList ml = MergeProject::cLiteralLines(mixed, 30);
+		check("混排拼接后字节不变",
+		      litsJoined(ml) == MergeProject::cStringOf(mixed), litsJoined(ml));
+		check("混排里 ASCII 段没被逐字符拆开",
+		      ml.value(0).contains(QStringLiteral("\"T=\"")), ml.value(0));
+
+		/* 长串折行：17 个汉字，首行前缀 30 列，必然折成多行 */
+		QString longText;
+		for (int i = 0; i < 17; ++i)
+		{
+			longText += QChar(0x4E00 + i);
+		}
+		const QStringList ll = MergeProject::cLiteralLines(longText, 30, 4, 80);
+		check("长串折成多行", ll.size() > 1, QString::number(ll.size()));
+		bool within = true;
+		for (int i = 0; i < ll.size(); ++i)
+		{
+			if (ll.at(i).size() > 80)
+			{
+				within = false;
+			}
+			if (i > 0 && !ll.at(i).startsWith(QStringLiteral("    ")))
+			{
+				within = false;
+			}
+		}
+		check("每行不超 80 列、续行缩进 4 空格", within, ll.join(QLatin1Char('\n')));
+		check("折行后字节仍然不变",
+		      litsJoined(ll) == MergeProject::cStringOf(longText), litsJoined(ll));
+
+		/* 空串：没有分段，调用方会补一对空引号 */
+		check("空串没有分段", MergeProject::cLiteralLines(QString(), 30).isEmpty(), QString());
+	}
+
 	std::printf("[撤销的边界]\n");
 	{
 		/* (a) 目标文件被人删了、只剩备份。

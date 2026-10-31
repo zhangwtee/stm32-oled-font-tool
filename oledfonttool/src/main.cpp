@@ -4167,12 +4167,35 @@ void MainWindow::copyAsCString()
 		{
 			continue;               /* 空行不占屏上的行号 */
 		}
-		/* 中文写成 \x 转义，行尾用 // 放原文对照。
-		 * 特意用行注释而不是块注释：注释里的中文即使被 armcc 按 GBK 错位解析，
-		 * 也吃不掉后面半行代码 —— 行注释没有结束符可以被吃。 */
-		code << QStringLiteral("OLED_CFont_ShowString(%1, 1, \"%2\");   // %3")
-		            .arg(line)
-		            .arg(MergeProject::cStringOf(t), t);
+
+		/* 每个字的转义后面紧跟它自己的汉字，折行由 cLiteralLines 按列宽算。
+		 * 不再用行尾「// 原文」：一串 17 个汉字转义出来两百多字符，注释
+		 * 在编辑器里软换行后就跑到视线外了，改哪个字节只能靠数。 */
+		const QString prefix = QStringLiteral("OLED_CFont_ShowString(%1, 1, ").arg(line);
+		QStringList lits = MergeProject::cLiteralLines(t, prefix.size());
+
+		QString stmt;
+		if (lits.size() <= 1)
+		{
+			stmt = prefix + (lits.isEmpty() ? QStringLiteral("\"\"") : lits.first());
+		}
+		else
+		{
+			/* 一行放不下：让前缀独占一行，字面量从 4 空格缩进重排。
+			 * 否则首行被前缀吃掉 27 列只能塞 2 个字，后面每行 3 个，
+			 * 参差不齐；重排后每行都是 3 个，肉眼好扫。 */
+			lits = MergeProject::cLiteralLines(t, 4);
+			/* 多行时前缀独占一行，末尾那个空格留着会变成行尾空白 */
+			stmt = prefix.trimmed();
+			for (int k = 0; k < lits.size(); ++k)
+			{
+				/* cLiteralLines 只给续行加缩进（单行模式调用方要接在前缀后面），
+				 * 这里前缀已经换行了，首行也得补上同样多的空格才对齐。 */
+				stmt += QLatin1Char('\n');
+				stmt += (k == 0 ? QStringLiteral("    ") + lits.at(k) : lits.at(k));
+			}
+		}
+		code << stmt + QStringLiteral(");");
 		++line;
 	}
 

@@ -1608,4 +1608,92 @@ QString readAsText(const QString &path)
 	return decodeFrom(raw, detectEnc(raw));
 }
 
+QStringList cLiteralLines(const QString &text, int firstCol, int indent, int maxCols)
+{
+	struct Part
+	{
+		QString seg;        /* 字面量，可能带紧跟的注释 */
+		int     width;      /* 估算列数 */
+	};
+
+	QVector<Part> parts;
+	QString asciiRun;
+
+	auto flushAscii = [&]()
+	{
+		if (asciiRun.isEmpty())
+		{
+			return;
+		}
+		Part p;
+		p.seg   = QLatin1Char('"') + cStringOf(asciiRun) + QLatin1Char('"');
+		p.width = p.seg.size();
+		parts.append(p);
+		asciiRun.clear();
+	};
+
+	for (int i = 0; i < text.size(); )
+	{
+		const QChar ch = text.at(i);
+		if (ch.unicode() < 0x80)
+		{
+			asciiRun += ch;
+			++i;
+			continue;
+		}
+
+		/* 代理对要整体取走，否则 emoji 会被拆成两个孤立的半个码元，
+		 * 转义出来的字节还是对的，但注释里会是两个问号 */
+		int len = 1;
+		if (ch.isHighSurrogate() && i + 1 < text.size() && text.at(i + 1).isLowSurrogate())
+		{
+			len = 2;
+		}
+		const QString one = text.mid(i, len);
+
+		flushAscii();
+
+		Part p;
+		p.seg = QLatin1Char('"') + cStringOf(one) + QLatin1Char('"')
+		        + QStringLiteral("/* ") + one + QStringLiteral(" */");
+		p.width = p.seg.size();
+		parts.append(p);
+		i += len;
+	}
+	flushAscii();
+
+	QStringList raw;                    /* 每行内容，不含缩进 */
+	QString cur;
+	int curW = firstCol;
+
+	for (const Part &p : parts)
+	{
+		const int w = p.width + (cur.isEmpty() ? 0 : 1);
+		if (!cur.isEmpty() && curW + w > maxCols)
+		{
+			raw << cur;
+			cur.clear();
+			curW = indent;
+		}
+		if (!cur.isEmpty())
+		{
+			cur += QLatin1Char(' ');
+			++curW;
+		}
+		cur += p.seg;
+		curW += p.width;
+	}
+	if (!cur.isEmpty())
+	{
+		raw << cur;
+	}
+
+	QStringList lines;
+	for (int k = 0; k < raw.size(); ++k)
+	{
+		lines << (k == 0 ? raw.at(k) : QString(indent, QLatin1Char(' ')) + raw.at(k));
+	}
+	return lines;
+}
+
 }   // namespace MergeProject
