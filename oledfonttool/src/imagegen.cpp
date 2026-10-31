@@ -174,7 +174,19 @@ QVector<quint8> ImageGen::convert(const QImage &src, const Options &opt)
 {
     const QImage gray = fitToTarget(src, opt.width, opt.height, opt.stretch);
     const QImage mono = toMono(gray, opt.threshold, opt.dither);
-    return packToDisplay(mono);
+    QVector<quint8> out = packToDisplay(mono);
+
+    /* 取反在打包之后做，直接对字节求反 —— 打包结果里每一位都是有效像素、
+     * 没有填充位，所以"每字节取反"就等于"每个点取反"，不用管
+     * Format_Mono 每行按 4 字节对齐那套细节。 */
+    if (opt.invert)
+    {
+        for (int i = 0; i < out.size(); ++i)
+        {
+            out[i] = (quint8)(~out[i]);
+        }
+    }
+    return out;
 }
 
 /*
@@ -456,6 +468,12 @@ QString ImageGen::renderHeader(const QVector<QVector<quint8>> &frames,
     s += QStringLiteral(" *  单色化  : %1, 阈值 %2\n")
              .arg(opt.dither == Bayer ? QStringLiteral("抖动") : QStringLiteral("简单阈值"))
              .arg(opt.threshold);
+    if (opt.invert)
+    {
+        /* 文件头写着"阴码"，数据却是反的，不注明的话过两个月没人看得懂 */
+        s += QStringLiteral(" *  反白    : 已取反（亮底暗图）。要恢复普通白点黑底，"
+                            "把「取反」取消后重新导出\n");
+    }
     s += QStringLiteral(" *\n");
     s += QStringLiteral(" *  数据格式：阴码 / 列行式 / 逆向(低位在前) —— 和汉字字库完全一致\n");
     s += QStringLiteral(" *            每字节 = 一列的 8 个像素，bit0 在最上面\n");
@@ -685,6 +703,22 @@ QString ImageGen::renderMultiHeader(const QVector<Asset> &assets, const QString 
     s += QStringLiteral(" *  合计    : %1 字节 (%2 KB)\n")
              .arg(totalBytes)
              .arg(totalBytes / 1024.0, 0, 'f', 1);
+
+    /* 打包文件里每份素材的参数是各自的，所以这里只做一次整体提醒：
+     * 只要有任意一份取反了，就写出来，免得照着"阴码"去对数据对不上。 */
+    bool anyInvert = false;
+    for (const Asset &a : list)
+    {
+        if (a.opt.invert)
+        {
+            anyInvert = true;
+            break;
+        }
+    }
+    if (anyInvert)
+    {
+        s += QStringLiteral(" *  反白    : 有素材已取反（亮底暗图），见各素材自己的取模设置\n");
+    }
     s += QStringLiteral(" *\n");
     s += QStringLiteral(" *  数据格式：阴码 / 列行式 / 逆向(低位在前) —— 和汉字字库完全一致\n");
     s += QStringLiteral(" *            每字节 = 一列的 8 个像素，bit0 在最上面\n");

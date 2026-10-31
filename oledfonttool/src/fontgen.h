@@ -46,6 +46,21 @@ public:
 	void setThreshold(int threshold);
 	void setSize(int size);          /* 换字号：换字体像素大小 + 清缓存 */
 
+	/* 取反（反白）。默认关。
+	 *
+	 * 打开后每个点对调：原来亮的变不亮、不亮的变亮，屏上就是「亮底暗字」。
+	 * 作用在最后成形的点阵上，所以字的形状、粗细、位置、大小都不变，
+	 * 只是黑白互换 —— 想在屏上做反白提示（选中行、标题条）时用这个。
+	 *
+	 * 注意两点：
+	 *   1) 空格和缺字那格会从「全灭」变成「全亮」。这是有意的：反白时
+	 *      一整行本来就该连成一片亮底，中间豁一个洞反而更怪。
+	 *   2) ASCII 不受影响。字母数字走驱动自带的 8×16 字库（CF_SHOW_ASCII），
+	 *      压根不进这份数据，所以同一行里汉字反白、字母不反白。
+	 *      要整行统一就只用汉字，或者自己在驱动里对 ASCII 取反。 */
+	void setInvert(bool on);
+	bool invert() const { return m_invert; }
+
 	QFont font() const { return m_font; }
 
 	/* 画汉字实际用的那套字体。
@@ -120,6 +135,7 @@ private:
 	QFont m_cjkFont;                 /* 画汉字用的；m_font 本身有汉字时就是它自己 */
 	bool  m_cjkSubstituted = false;  /* true = 选了字体但没有汉字，已换成别的 */
 	bool  m_cjkNoAa = false;         /* true = 汉字按整像素渲染，不走抗锯齿 */
+	bool  m_invert = false;          /* true = 点阵取反，屏上反白 */
 	int m_threshold;
 	int m_size;
 	mutable QMap<QChar, QVector<QVector<bool>>> m_cache;   /* const 成员函数里也能写缓存 */

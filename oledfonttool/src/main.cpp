@@ -746,6 +746,7 @@ private:
 	QLabel *m_fontWarn;
 	QSlider *m_threshold;
 	QLabel *m_thresholdValue;
+	QCheckBox *m_invert;            /* 点阵取反：屏上反白显示 */
 	QCheckBox *m_asciiFont;
 	FontPreview *m_preview;
 	QLabel *m_status;
@@ -788,6 +789,7 @@ private:
 	QSlider                     *m_imgThreshold;
 	QLabel                      *m_imgThresholdValue;
 	QCheckBox                   *m_imgDither;
+	QCheckBox                   *m_imgInvert;   /* 取反：黑白对调（反白） */
 	QCheckBox                   *m_imgMerge;    /* 多选时合成一个动画（不勾＝各存一份） */
 	QPushButton                 *m_imgPlayBtn;
 	QTimer                      *m_imgTimer;
@@ -915,6 +917,18 @@ void MainWindow::buildUi()
 	QLabel *thrLabel = new QLabel(QStringLiteral("阈值"), boxSet);
 	thrLabel->setMinimumWidth(30);        /* 不设的话窄面板里会被滑块压成半截 */
 	form->addRow(thrLabel, thrRow);
+
+	/* 取反。作用在成形的点阵上，和阈值是两件独立的事，所以单独一行，
+	 * 不塞进阈值那一行里。 */
+	m_invert = new QCheckBox(QStringLiteral("取反色（反白显示）"), boxSet);
+	m_invert->setToolTip(QStringLiteral(
+		"把点阵每一位对调：原来亮的变不亮，屏上就是「亮底暗字」。\n"
+		"字的形状、粗细、位置都不变，只是黑白互换 —— 做反白标题条、\n"
+		"选中行这类效果时用。\n\n"
+		"两点注意：\n"
+		"· 空格和缺的字那格会变成一整块亮的（反白时本来就该连成一片）\n"
+		"· 字母数字走驱动自带的 ASCII 字库，不在这份数据里，不会跟着反白"));
+	form->addRow(QString(), m_invert);
 
 	innerLayout->addWidget(boxSet);
 
@@ -1214,6 +1228,8 @@ void MainWindow::buildUi()
 		m_thresholdValue->setText(QString::number(v));
 		refreshPreview();
 	});
+	/* 取反只影响成形后的点阵，字体/字号/阈值都不用重算，走同一条刷新路径即可 */
+	connect(m_invert, &QCheckBox::toggled, this, &MainWindow::refreshPreview);
 	connect(m_asciiFont, &QCheckBox::toggled, this, &MainWindow::updateStatus);
 	connect(exportBtn, &QPushButton::clicked, this, &MainWindow::exportHeader);
 	connect(importBtn, &QPushButton::clicked, this, &MainWindow::importHeader);
@@ -1334,6 +1350,13 @@ QWidget *MainWindow::buildImagePage()
 	m_imgDither->setChecked(true);
 	form->addRow(QString(), m_imgDither);
 
+	m_imgInvert = new QCheckBox(QStringLiteral("取反色（反白显示）"), boxOpt);
+	m_imgInvert->setToolTip(QStringLiteral(
+	    "把整幅图每一位对调：原来亮的地方不亮，屏上是亮底暗图。\n"
+	    "和阈值、抖动互不影响，是在它们之后统一做的。\n"
+	    "logo、图标这类深色背景的图，反白后更省电、也更清楚。"));
+	form->addRow(QString(), m_imgInvert);
+
 	sideLayout->addWidget(boxOpt);
 
 	m_imgInfo = new QLabel(side);
@@ -1429,6 +1452,7 @@ QWidget *MainWindow::buildImagePage()
 	connect(m_imgStep, QOverload<int>::of(&QComboBox::currentIndexChanged),
 	        this, [onParamChanged](int) { onParamChanged(); });
 	connect(m_imgDither, &QCheckBox::toggled, this, [onParamChanged](bool) { onParamChanged(); });
+	connect(m_imgInvert, &QCheckBox::toggled, this, [onParamChanged](bool) { onParamChanged(); });
 	connect(m_imgThreshold, &QSlider::valueChanged, this, [this, onParamChanged](int v) {
 		m_imgThresholdValue->setText(QString::number(v));
 		onParamChanged();
@@ -1450,6 +1474,7 @@ ImageGen::Options MainWindow::imageOptions() const
 	opt.stretch   = (m_imgScale->currentData().toInt() == 1);
 	opt.threshold = m_imgThreshold->value();
 	opt.dither    = m_imgDither->isChecked() ? ImageGen::Bayer : ImageGen::NoDither;
+	opt.invert    = m_imgInvert->isChecked();
 	opt.colOffset = currentColOffset();
 	return opt;
 }
@@ -1878,6 +1903,7 @@ void MainWindow::showAsset(int row)
 		const QSignalBlocker b3(m_imgStep);
 		const QSignalBlocker b4(m_imgThreshold);
 		const QSignalBlocker b5(m_imgDither);
+		const QSignalBlocker b6(m_imgInvert);
 
 		int idx = m_imgSize->findData(QPoint(a->opt.width, a->opt.height));
 		if (idx >= 0)
@@ -1893,6 +1919,7 @@ void MainWindow::showAsset(int row)
 		m_imgThreshold->setValue(a->opt.threshold);
 		m_imgThresholdValue->setText(QString::number(a->opt.threshold));
 		m_imgDither->setChecked(a->opt.dither == ImageGen::Bayer);
+		m_imgInvert->setChecked(a->opt.invert);
 	}
 
 	const int delay = qMax(20, effectiveDelayMs());
@@ -2380,6 +2407,12 @@ void MainWindow::showSelfTest()
 
 	const QString sampleText = QStringLiteral("取模正确");
 
+	/* 自检帧验的是"工具吐出来的字节和驱动对不对"，取的是工具的原始点阵。
+	 * 用户勾了取反也不该影响它：反白的自检帧看起来正好像"极性反了"，
+	 * 这张图就失去诊断作用了。所以这里用一份不取反的副本。 */
+	FontGen stGen(m_gen);
+	stGen.setInvert(false);
+
 	auto sample = [&]() {
 		return withText->isChecked() ? sampleText : QString();
 	};
@@ -2393,7 +2426,7 @@ void MainWindow::showSelfTest()
 		const QPoint sz = curSize();
 		screen->setFixedSize(sz.x() * 4 + 2, sz.y() * 4 + 2);
 
-		const QImage img = SelfTest::buildImage(&m_gen, sample(), sz.x(), sz.y());
+		const QImage img = SelfTest::buildImage(&stGen, sample(), sz.x(), sz.y());
 		screen->setPixmap(QPixmap::fromImage(
 			img.scaled(sz.x() * 4, sz.y() * 4,
 			           Qt::IgnoreAspectRatio, Qt::FastTransformation)));
@@ -2411,7 +2444,7 @@ void MainWindow::showSelfTest()
 		}
 
 		const QPoint sz = curSize();
-		const QImage img = SelfTest::buildImage(&m_gen, sample(), sz.x(), sz.y());
+		const QImage img = SelfTest::buildImage(&stGen, sample(), sz.x(), sz.y());
 		const QString content = SelfTest::renderHeader(
 			SelfTest::pack(img), sample(), m_gen.size(), m_fontBox->currentText(),
 			currentColOffset(), sz.x(), sz.y());
@@ -2917,6 +2950,7 @@ void MainWindow::refreshPreview()
 	f.setPixelSize(m_gen.size());
 	m_gen.setFont(f);
 	m_gen.setThreshold(m_threshold->value());
+	m_gen.setInvert(m_invert->isChecked());
 
 	checkFontExists();
 	m_preview->setText(m_text->toPlainText());

@@ -1105,6 +1105,151 @@ int main(int argc, char **argv)
 		}
 	}
 
+	/* ---------------- 取反（反白） ----------------
+	 * 取反是"成形之后整体对调"，所以只需盯三件事：
+	 * 每一格是不是都反了、字形有没有被挪动、开关来回拨能不能复原。
+	 */
+	std::printf("[取反（反白）]\n");
+	{
+		FontGen plain(QFont(QStringLiteral("SimSun"), 16), 110, 16);
+		check("默认不取反", !plain.invert());
+
+		const QChar c = QChar(u'温');
+		const QVector<QVector<bool>> base = plain.glyphBits(c);
+
+		/* 复制一份再开取反：同一个对象上改会一起把缓存清掉，
+		 * 那样就分不清"算错了"还是"缓存没清"了。 */
+		FontGen inv(plain);
+		inv.setInvert(true);
+		check("开了以后 invert() 为真", inv.invert());
+
+		const QVector<QVector<bool>> flipped = inv.glyphBits(c);
+
+		bool cellOk = (flipped.size() == base.size());
+		int litFlipped = 0, litBase = 0;
+		for (int y = 0; y < base.size() && cellOk; ++y)
+		{
+			if (flipped.at(y).size() != base.at(y).size())
+			{
+				cellOk = false;
+				break;
+			}
+			for (int x = 0; x < base.at(y).size(); ++x)
+			{
+				if (flipped.at(y).at(x) != !base.at(y).at(x))
+				{
+					cellOk = false;
+					break;
+				}
+				if (flipped.at(y).at(x))
+				{
+					++litFlipped;
+				}
+				if (base.at(y).at(x))
+				{
+					++litBase;
+				}
+			}
+		}
+		check("每一格都和原来相反", cellOk);
+
+		/* 互补就说明没有多补一个边、也没有把背景算成墨迹挪位置 */
+		check("亮点的总数正好互补（16×16）", litFlipped + litBase == 16 * 16,
+		      QStringLiteral("%1 + %2").arg(litFlipped).arg(litBase));
+		check("原字不是全黑也不是全亮（这条测试本身有效）",
+		      litBase > 0 && litBase < 16 * 16, QStringLiteral("%1").arg(litBase));
+
+		const QVector<quint8> bytesPlain = plain.glyphBytes(c);
+		const QVector<quint8> bytesInv   = inv.glyphBytes(c);
+		bool xorOk = (bytesPlain.size() == bytesInv.size()) && !bytesPlain.isEmpty();
+		for (int i = 0; xorOk && i < bytesPlain.size(); ++i)
+		{
+			if (static_cast<quint8>(bytesPlain.at(i) ^ bytesInv.at(i)) != 0xFFu)
+			{
+				xorOk = false;
+			}
+		}
+		check("32 个字节逐字节都是异或 0xFF", xorOk,
+		      QStringLiteral("%1 字节").arg(bytesPlain.size()));
+
+		FontGen back(inv);
+		back.setInvert(false);
+		check("关掉以后点阵回到原样", back.glyphBits(c) == base);
+
+		/* 缓存：同一个对象先算一次，再拨开关，必须拿到新的那份 */
+		FontGen live(QFont(QStringLiteral("SimSun"), 16), 110, 16);
+		const QVector<QVector<bool>> first = live.glyphBits(c);
+		live.setInvert(true);
+		check("拨开关后缓存被清掉（不是还在返回旧的）", live.glyphBits(c) != first);
+
+		QString err;
+		const QString h0 = plain.generateHeader(QStringLiteral("温度"), &err);
+		const QString h1 = inv.generateHeader(QStringLiteral("温度"), &err);
+		check("不取反时文件头不提反白", !h0.contains(QStringLiteral("已取反")));
+		check("取反时文件头写明已取反", h1.contains(QStringLiteral("已取反")));
+		check("两版文件头里的点阵字节数一样（只是值反了）",
+		      macroValue(h0, QStringLiteral("OLED_CFONT_BYTES"))
+		          == macroValue(h1, QStringLiteral("OLED_CFONT_BYTES")));
+	}
+
+	/* 图片这条路是打包成字节以后再逐字节求反的，单独验一次 */
+	{
+		ImageGen::Options o;
+		o.width = 32;
+		o.height = 16;
+		o.threshold = 128;
+		o.dither = ImageGen::NoDither;
+
+		QImage src(64, 32, QImage::Format_Grayscale8);
+		src.fill(255);
+		for (int y = 0; y < 16; ++y)          /* 留一块全黑，保证黑白都有 */
+		{
+			uchar *line = src.scanLine(y);
+			for (int x = 0; x < 16; ++x)
+			{
+				line[x] = 0;
+			}
+		}
+
+		const QVector<quint8> p0 = ImageGen::convert(src, o);
+		ImageGen::Options oi = o;
+		oi.invert = true;
+		const QVector<quint8> p1 = ImageGen::convert(src, oi);
+
+		bool imgXorOk = (p0.size() == p1.size()) && !p0.isEmpty();
+		int on0 = 0, on1 = 0;
+		for (int i = 0; i < p0.size(); ++i)
+		{
+			if (static_cast<quint8>(p0.at(i) ^ p1.at(i)) != 0xFFu)
+			{
+				imgXorOk = false;
+			}
+			for (int b = 0; b < 8; ++b)
+			{
+				if (p0.at(i) & (1u << b))
+				{
+					++on0;
+				}
+				if (p1.at(i) & (1u << b))
+				{
+					++on1;
+				}
+			}
+		}
+		check("图片取反：每个字节都是补码", imgXorOk,
+		      QStringLiteral("%1 字节").arg(p0.size()));
+		check("图片取反：亮的点数互补（32×16 = 512）", on0 + on1 == 32 * 16,
+		      QStringLiteral("%1 + %2").arg(on0).arg(on1));
+
+		QVector<QVector<quint8>> one0, one1;
+		one0.append(p0);
+		one1.append(p1);
+		const QString ih0 = ImageGen::renderHeader(one0, o, 100, QStringLiteral("a.png"));
+		const QString ih1 = ImageGen::renderHeader(one1, oi, 100, QStringLiteral("a.png"));
+		check("图片不反白时文件头不提反白", !ih0.contains(QStringLiteral("反白")));
+		check("图片反白时文件头写明", ih1.contains(QStringLiteral("反白")));
+	}
+
 	std::printf("\n%d passed, %d failed\n", g_pass, g_fail);
 	return g_fail == 0 ? 0 : 1;
 }

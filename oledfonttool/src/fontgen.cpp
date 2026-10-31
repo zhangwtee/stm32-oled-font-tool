@@ -195,6 +195,17 @@ void FontGen::setThreshold(int threshold)
 	}
 }
 
+/* 取反。缓存里的点阵也是取反前的，必须跟着清掉，
+ * 否则勾上开关后预览还显示旧的那一份。 */
+void FontGen::setInvert(bool on)
+{
+	if (on != m_invert)
+	{
+		m_invert = on;
+		m_cache.clear();
+	}
+}
+
 /*
  * 渲染：N×N 画布上画字 -> 取墨迹边界 -> 整体平移居中 -> 按阈值二值化
  * 平移这一步不能省：宋体的字形在字身框里天然偏左偏上，不居中的话点阵会贴边
@@ -268,6 +279,19 @@ QVector<QVector<bool>> FontGen::renderBits(QChar ch) const
 		for (int x = 0; x < S; ++x)
 		{
 			bits[y][x] = (line[x] >= thr);
+		}
+	}
+
+	/* 取反放在最后：居中、二值化都是按"墨迹"判的，先取反会把墨迹判成背景，
+	 * 字形会被挪到别处去了。 */
+	if (m_invert)
+	{
+		for (int y = 0; y < S; ++y)
+		{
+			for (int x = 0; x < S; ++x)
+			{
+				bits[y][x] = !bits[y][x];
+			}
 		}
 	}
 	return bits;
@@ -394,6 +418,13 @@ QString FontGen::generateHeader(const QString &text, QString *errorOut, int colO
 	const int stride = 3 + per;           /* 字库里一行多少字节 */
 	const QString tbl = tableName(S);     /* 数组名，比如 OLED_CF24x24 */
 
+	/* 勾了「取反」就把这件事写进文件里。不写的话文件头的「阴码」两个字
+	 * 就是在说假话，用户过两个月回来看会以为自己哪里搞错了。 */
+	const QString invNote = m_invert
+	        ? QStringLiteral(" *      【本字库已取反】每一位都反了，屏上是亮底暗字（反白）。\n"
+	                         " *      要改回普通白字黑底，把取反开关关掉重新导出即可。\n")
+	        : QString();
+
 	QString out;
 	out += QStringLiteral(
 		"#ifndef __OLED_CFONT_H\n"
@@ -404,6 +435,7 @@ QString FontGen::generateHeader(const QString &text, QString *errorOut, int colO
 		" *\n"
 		" *  取模格式（与 OLED.c 的 OLED_ShowChinese 对应）：\n"
 		" *      阴码 / 列行式 / 逆向(低位在前) / C51格式\n"
+		"%6"
 		" *      一个汉字 = %3 页 x %1 字节 = %2 字节（每页对应 8 行像素）\n"
 		" *\n"
 		" *  每行的排布：前 3 字节是该字的 UTF-8 编码，后面 %2 字节是点阵，\n"
@@ -434,7 +466,8 @@ QString FontGen::generateHeader(const QString &text, QString *errorOut, int colO
 		.arg(per)
 		.arg(pages)
 		.arg(stride)
-		.arg(tbl);
+		.arg(tbl)
+		.arg(invNote);
 
 	for (int i = 0; i < n; ++i)
 	{

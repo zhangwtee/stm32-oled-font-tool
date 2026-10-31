@@ -36,6 +36,7 @@ public:
         bool   stretch   = false;   /* false = 等比缩放 + 留白；true = 拉伸填满 */
         int    threshold = 128;     /* 0~255，越小越亮/越粗 */
         Dither dither    = Bayer;
+        bool   invert    = false;   /* true = 黑白对调（反白）：亮的地方变灭，灭的变亮 */
         int    colOffset = 0;       /* SH1106（132 列）填 2，SSD1306 填 0 */
     };
 
