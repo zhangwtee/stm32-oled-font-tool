@@ -708,7 +708,6 @@ private:
 	void updateSubTitle();
 	void checkFontExists();
 	void checkSourceEncoding(bool popupOnProblem);
-	void writeEncodingLog(const QStringList &lines) const;
 	QString defaultHeaderPath() const;
 	/* 让用户自己指定工程目录，并重新推算字库落点。
 	 * 自动定位猜不准时用它 —— 手动指过一次就记住，比任何猜测都可靠。 */
@@ -3260,21 +3259,9 @@ void MainWindow::checkSourceEncoding(bool popupOnProblem)
 {
 	const QString root = findProjectRoot(m_headerPath);
 
-	/* 把检查过程写进日志文件。
-	 * 这类"静默失效"的问题光看界面看不出来（根目录找错了也只是显示"没找到"），
-	 * 落盘之后可以直接读文件排查，不用来回截图。 */
-	QStringList log;
-	log << QStringLiteral("=== 源码编码检查 ===");
-	log << QStringLiteral("时间: %1").arg(QDateTime::currentDateTime().toString(Qt::ISODate));
-	log << QStringLiteral("程序目录: %1").arg(QCoreApplication::applicationDirPath());
-	log << QStringLiteral("字库路径: %1").arg(m_headerPath.isEmpty() ? QStringLiteral("(空)") : m_headerPath);
-	log << QStringLiteral("推算的工程根: %1").arg(root.isEmpty() ? QStringLiteral("(空)") : root);
-
 	if (root.isEmpty())
 	{
 		m_encStatus->setText(QStringLiteral("源码编码：未找到工程目录，跳过检查"));
-		log << QStringLiteral("结果: 未找到工程目录");
-		writeEncodingLog(log);
 		return;
 	}
 
@@ -3288,7 +3275,6 @@ void MainWindow::checkSourceEncoding(bool popupOnProblem)
 	 * 上限 1200 个文件、深度 4 层，够覆盖正常工程。 */
 	QStringList sources;
 	collectSourceFiles(QDir(root), sources, 4, 1200);
-	log << QStringLiteral("扫描到 %1 个 .c/.h 文件").arg(sources.size());
 
 	for (const QString &path : sources)
 	{
@@ -3298,7 +3284,6 @@ void MainWindow::checkSourceEncoding(bool popupOnProblem)
 			const QString enc = detectSourceEncoding(path, &text, &raw);
 			if (enc.isEmpty())
 			{
-				log << QStringLiteral("    %1: 打不开").arg(name);
 				continue;
 			}
 
@@ -3319,9 +3304,6 @@ void MainWindow::checkSourceEncoding(bool popupOnProblem)
 					if (sample.isEmpty()) sample = lit;
 				}
 			}
-			log << QStringLiteral("    %1: 编码=%2 字面量=%3 含中文=%4")
-			       .arg(name, enc).arg(literals.size())
-			       .arg(hasChineseLiteral ? QStringLiteral("是") : QStringLiteral("否"));
 			if (!hasChineseLiteral)
 			{
 				continue;
@@ -3350,8 +3332,6 @@ void MainWindow::checkSourceEncoding(bool popupOnProblem)
 		/* 把扫描的目录写出来，方便判断"是真的没有"还是"根目录找错了" */
 		m_encStatus->setText(QStringLiteral("源码编码：%1 下没找到含中文的字符串字面量")
 		                     .arg(QDir::toNativeSeparators(root)));
-		log << QStringLiteral("结果: 没有含中文字面量的文件");
-		writeEncodingLog(log);
 		return;
 	}
 
@@ -3359,8 +3339,6 @@ void MainWindow::checkSourceEncoding(bool popupOnProblem)
 	{
 		m_encStatus->setText(QStringLiteral("源码编码：✓ 正常（%1）")
 		                     .arg(details.join(QStringLiteral("、"))));
-		log << QStringLiteral("结果: 正常");
-		writeEncodingLog(log);
 		return;
 	}
 
@@ -3384,8 +3362,6 @@ void MainWindow::checkSourceEncoding(bool popupOnProblem)
 	{
 		m_encStatus->setText(QStringLiteral("⚠ %1 是 UTF-8 但缺 BOM，AC5 会报 #8")
 		                     .arg(noBom.join(QStringLiteral("、"))));
-		log << QStringLiteral("结果: 缺 BOM -> %1").arg(noBom.join(QStringLiteral("; ")));
-		writeEncodingLog(log);
 
 		if (popupOnProblem)
 		{
@@ -3407,38 +3383,12 @@ void MainWindow::checkSourceEncoding(bool popupOnProblem)
 	m_encStatus->setText(QStringLiteral("⚠ 源码编码不匹配：%1")
 	                     .arg(mismatch.join(QStringLiteral("、"))));
 
-	log << QStringLiteral("结果: 不匹配 -> %1").arg(mismatch.join(QStringLiteral("; ")));
-	if (!noBom.isEmpty())
-	{
-		log << QStringLiteral("另有缺 BOM -> %1").arg(noBom.join(QStringLiteral("; ")));
-	}
-	writeEncodingLog(log);
-
 	if (popupOnProblem)
 	{
 		/* 两件事一起说：只说编码不对，用户改完 UTF-8 还会撞上缺 BOM 这一关 */
 		const QString full = noBom.isEmpty() ? msg : msg + QStringLiteral("\n\n") + bomHint;
 		QMessageBox::warning(this, QStringLiteral("源码编码和字库不一致"), full);
 	}
-}
-
-/* 把编码检查的过程写到程序目录下的 encoding-check.txt */
-void MainWindow::writeEncodingLog(const QStringList &lines) const
-{
-	const QString path = QDir(QCoreApplication::applicationDirPath())
-		.absoluteFilePath(QStringLiteral("encoding-check.txt"));
-	QFile f(path);
-	if (!f.open(QIODevice::WriteOnly | QIODevice::Text))
-	{
-		return;
-	}
-	QTextStream ts(&f);
-	ts.setEncoding(QStringConverter::Utf8);
-	for (const QString &l : lines)
-	{
-		ts << l << "\n";
-	}
-	f.close();
 }
 
 /* 从工程源码里判断这屏是 SSD1306 还是 SH1106。
