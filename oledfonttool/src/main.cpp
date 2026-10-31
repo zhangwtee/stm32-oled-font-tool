@@ -631,7 +631,6 @@ static const char *kQss =
 	"#Purpose { color: #374151; font-size: 12px; }"
 	"#SubTitle, #Hint { color: #6B7280; font-size: 11px; }"
 	"#RepoLink { color: #374151; font-size: 12px; }"
-	"#RepoLink a { color: #0B5394; text-decoration: underline; }"
 	"#Count { color: #1F6FEB; font-size: 12px; font-weight: 600; }"
 	"#Warn { color: #B45309; background: #FEF3C7; border: 1px solid #FDE68A;"
 	"        border-radius: 4px; padding: 4px 6px; font-size: 11px; }"
@@ -856,10 +855,15 @@ QWidget *MainWindow::makeRepoLinks(QWidget *parent)
 	label->setMinimumWidth(1);
 	label->setTextInteractionFlags(Qt::TextBrowserInteraction);
 	label->setOpenExternalLinks(false);
+	/* 链接颜色不靠 palette（Qt 富文本 <a> 的 Link 色在 Windows 上走系统主题，
+	 * 设 palette 也不一定生效），改用 <span style> 内联色，一定生效。
+	 * <a href> 仍保留，linkActivated 才能触发打开浏览器。 */
 	label->setText(QStringLiteral(
-		"GitHub&nbsp;&nbsp;<a href=\"https://github.com/zhangwtee\">"
+		"GitHub&nbsp;&nbsp;<a href=\"https://github.com/zhangwtee\" "
+		"style=\"color:#0B5394; text-decoration:underline;\">"
 		"github.com/zhangwtee</a><br>"
-		"Gitee&nbsp;&nbsp;<a href=\"https://gitee.com/z_w_t\">"
+		"Gitee&nbsp;&nbsp;<a href=\"https://gitee.com/z_w_t\" "
+		"style=\"color:#0B5394; text-decoration:underline;\">"
 		"gitee.com/z_w_t</a>"));
 	QObject::connect(label, &QLabel::linkActivated, this,
 	                 [](const QString &link) { QDesktopServices::openUrl(QUrl(link)); });
