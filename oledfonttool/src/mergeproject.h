@@ -118,6 +118,17 @@ enum class SrcIssue
 
 SrcIssue judgeSource(const QByteArray &raw, bool hasNonAsciiLiteral);
 
+/*
+ * 把一段文字转成能直接粘进 .c 的字符串字面量内容。
+ *
+ * 纯 ASCII 原样返回（"AB" 不写成 "\x41\x42"）；含中文就逐字节转成
+ * "\xE5\xBC\xA0"。这样源码里没有中文字节，armcc 按 GBK 解析时不会
+ * 把后面的引号吞掉，Keil 保存时把 BOM 弄丢也照样编得过。
+ *
+ * 返回的是"引号里面那部分"，调用方自己加 " ... "。
+ */
+QString cStringOf(const QString &text);
+
 }   // namespace MergeProject
 
 #endif   // MERGEPROJECT_H

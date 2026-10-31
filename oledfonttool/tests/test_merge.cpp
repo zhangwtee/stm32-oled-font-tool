@@ -269,6 +269,32 @@ int main(int argc, char **argv)
 		writeFile(mainC, mainBytes);
 	}
 
+	std::printf("[C 字符串转义]\n");
+	{
+		/* 界面上的「复制为 C 字符串」直接调这个函数，所以它得自己保证
+		 * 结果能原样粘进 .c：中文逐字节转义、引号/反斜杠转义、
+		 * \x 后面紧跟十六进制字符时要断开字符串。 */
+		struct Case
+		{
+			const char *what;
+			const char *in;
+			const char *want;
+		};
+		const Case cases[] = {
+			{ "纯 ASCII 原样返回",     "AB12",  "AB12" },
+			{ "一个汉字",              "\xE5\xBC\xA0", "\\xE5\\xBC\\xA0" },
+			{ "中英混排",              "A\xE5\xBC\xA0", "A\\xE5\\xBC\\xA0" },
+			{ "中文后跟十六进制字符",  "\xE5\xBC\xA0" "A", "\\xE5\\xBC\\xA0" "\"\"A" },
+			{ "双引号要转义",          "a\"b", "a\\\"b" },
+			{ "反斜杠要转义",          "a\\b", "a\\\\b" },
+		};
+		for (const Case &c : cases)
+		{
+			const QString got = MergeProject::cStringOf(QString::fromUtf8(c.in));
+			check(c.what, got == QString::fromUtf8(c.want), got);
+		}
+	}
+
 	std::printf("[撤销的边界]\n");
 	{
 		/* (a) 目标文件被人删了、只剩备份。

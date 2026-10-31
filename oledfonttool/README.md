@@ -110,6 +110,10 @@ oledfonttool\
 7. 双击 `src\install-cfont.cmd` 搬运进工程
 8. Keil 里 Rebuild
 
+写代码的时候用「**复制为 C 字符串**」：把第 1 步那段文字直接变成能粘进 `main.c` 的
+调用句（中文全写成 `\xNN`，粘完就能编）。手打中文串会撞上 armcc 的 GBK 解析，
+报 `#8: missing closing quote`——见文末「一处硬要求」。
+
 「导入已有字库」会把现成的 `OLED_CFont.h` 读回来**并合并**（不是替换），可以在它基础上加字。
 
 **如果弹出"导出成功（需要手动搬运）"**：说明程序没有权限直接写工程目录。
@@ -458,9 +462,16 @@ Qt 版实现在 `src\fontgen.cpp`，Python 版在 `src\gen_oled_hz.py`。
 #include "OLED_CFont.h"
 
 OLED_Init();
-OLED_CFont_ShowString(1, 1, "温度正常");        /* 第 1 行，第 1 列 */
-OLED_CFont_ShowString(2, 1, "T=25C 湿度60%");   /* 中英混排 */
+OLED_CFont_ShowString(1, 1, "\xE6\xB8\xA9\xE5\xBA\xA6");            // 温度
+OLED_CFont_ShowString(2, 1, "T=25C \xE6\xB9\xBF\xE5\xBA\xA6");      // 中英混排
 ```
+
+**中文串别手打**——上面那两串 `\xE6\xB8\xA9...` 不是让人手写的。文字页
+「① 要显示的文字」下面有个 **「复制为 C 字符串」** 按钮：你分几行，它就生成几句，
+行号从 1 递增，中文逐字节转成 `\xNN`，行尾用 `// 原文` 给你对照。点一下、粘进 `main.c` 就行。
+
+这么写不只是省事：**源码里没有中文字节**，armcc 按 GBK 解析时没有东西可以吞掉引号，
+Keil 保存时把 UTF-8 BOM 弄丢也照样编得过（原因见文末「一处硬要求」那一节）。
 
 `line` 是第几行文字（从 1 开始），`col` 是从第几列开始（单位 8 像素，和
 `OLED_ShowString` 的 `Column` 一致）。16×16 的汉字占 2 列，24×24 占 3 列，32×32 占 4 列。

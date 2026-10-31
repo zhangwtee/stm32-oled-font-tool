@@ -1,6 +1,7 @@
 #include <QApplication>
 #include <QByteArray>
 #include <QCheckBox>
+#include <QClipboard>
 #include <QCollator>
 #include <QComboBox>
 #include <QCoreApplication>
@@ -681,6 +682,11 @@ private:
 	void exportHeader(bool askForPath = true);
 	void importHeader();
 
+	/* 把「① 要显示的文字」变成能直接粘进 .c 的调用句，塞进剪贴板。
+	 * 中文一律写成 \xE5\xBC\xA0 这种字节转义 —— 源码里没有中文字节，
+	 * Keil 保存时把 BOM 弄丢也不会报 #8。 */
+	void copyAsCString();
+
 	void buildUi();
 	void updateStatus();
 	/* 侧栏副标题跟着「取反」开关变：勾上以后屏上是亮底暗字，
@@ -966,6 +972,20 @@ void MainWindow::buildUi()
 	m_countLabel->setWordWrap(true);
 	m_countLabel->setMinimumWidth(1);
 	textLayout->addWidget(m_countLabel);
+
+	/* 字库导出后，用户手里还是"一堆字节 + 一句怎么写"。中文串写进源码又会撞
+	 * armcc 的 GBK 解析（#8: missing closing quote），而手写 \xE5\xBC\xA0
+	 * 没人愿意干。这里把整段文字直接转成能粘的调用句。 */
+	QPushButton *copyStrBtn = new QPushButton(QStringLiteral("复制为 C 字符串"), boxText);
+	copyStrBtn->setToolTip(QStringLiteral(
+		"把上面这段文字生成能直接粘进 main.c 的调用句，例如：\n"
+		"    OLED_CFont_ShowString(1, 1, \"\\xE5\\xBC\\xA0\\xE4\\xB8\\x89\");   // 张三\n\n"
+		"· 你分几行，它就生成几句，行号从 1 递增；列号固定 1（单位 8 像素）\n"
+		"· 中文写成字节转义，屏幕上还是原来的字，但源码里没有中文字节 ——\n"
+		"  Keil 保存时把 UTF-8 BOM 弄丢也不会报 #8\n"
+		"· 行尾的 // 注释是给你对照的，删掉不影响"));
+	textLayout->addWidget(copyStrBtn);
+	connect(copyStrBtn, &QPushButton::clicked, this, &MainWindow::copyAsCString);
 
 	m_hint = new QLabel(boxText);
 	m_hint->setObjectName(QStringLiteral("Hint"));
@@ -4125,6 +4145,64 @@ void MainWindow::importHeader()
 	m_status->setText(QStringLiteral("已导入 %1 字，合并后共 %2 字")
 	                  .arg(added)
 	                  .arg(after));
+}
+
+/* 把「① 要显示的文字」变成能直接粘进 .c 的调用句 */
+void MainWindow::copyAsCString()
+{
+	const QString raw = m_text->toPlainText();
+
+	/* OLED_CFont_ShowString 不认 '\n'：换行符会走 ASCII 分支交给 OLED_ShowChar，
+	 * 屏上多一个乱码格。所以"你分几行"就直接变成"屏上第几行"，
+	 * 一句一行、行号递增，比把换行符塞进字符串里合理。 */
+	const QStringList rows = raw.split(QRegularExpression(QStringLiteral("[\r\n]+")),
+	                                   Qt::SkipEmptyParts);
+
+	QStringList code;
+	int line = 1;
+	for (const QString &r : rows)
+	{
+		const QString t = r.trimmed();
+		if (t.isEmpty())
+		{
+			continue;               /* 空行不占屏上的行号 */
+		}
+		/* 中文写成 \x 转义，行尾用 // 放原文对照。
+		 * 特意用行注释而不是块注释：注释里的中文即使被 armcc 按 GBK 错位解析，
+		 * 也吃不掉后面半行代码 —— 行注释没有结束符可以被吃。 */
+		code << QStringLiteral("OLED_CFont_ShowString(%1, 1, \"%2\");   // %3")
+		            .arg(line)
+		            .arg(MergeProject::cStringOf(t), t);
+		++line;
+	}
+
+	if (code.isEmpty())
+	{
+		m_status->setText(QStringLiteral("「① 要显示的文字」是空的，没有可复制的。"));
+		return;
+	}
+
+	QApplication::clipboard()->setText(code.join(QLatin1Char('\n')));
+
+	/* 行数超过屏放得下的，提醒一句 —— ShowGlyph 的页范围检查不通过时会静默
+	 * 不写，用户只会看到"第 5 行怎么不显示"，猜不到是行数超了。 */
+	const int pages   = qMax(1, m_gen.size() / 8);
+	const int screenH = m_screenHBox->currentData().toInt() > 0
+	                        ? m_screenHBox->currentData().toInt()
+	                        : 64;
+	const int maxLine = qMax(1, screenH / (pages * 8));
+
+	QString msg = QStringLiteral("已复制 %1 句（中文写成 \\x 转义，粘进 main.c 即可）")
+	                  .arg(static_cast<int>(code.size()));
+	if (code.size() > maxLine)
+	{
+		msg += QStringLiteral("。注意 %1×%1 的字在这块 %2 像素高的屏上只放得下 %3 行，"
+		                      "多出来的行不会显示")
+		           .arg(m_gen.size())
+		           .arg(screenH)
+		           .arg(maxLine);
+	}
+	m_status->setText(msg);
 }
 
 int main(int argc, char *argv[])

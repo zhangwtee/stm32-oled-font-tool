@@ -207,7 +207,7 @@ static QString decodeFrom(const QByteArray &b, Enc e)
  * 只要写进去的源码里根本没有中文字节，BOM 丢不丢都无所谓。
  *
  * 纯 ASCII 原样返回（"AB" 没必要写成 "\x41\x42"）；有中文就逐字节转义。 */
-static QString cStringInner(const QString &s)
+QString cStringOf(const QString &s)
 {
 	const QByteArray u8 = s.toUtf8();
 	bool nonAscii = false;
@@ -221,7 +221,19 @@ static QString cStringInner(const QString &s)
 	}
 	if (!nonAscii)
 	{
-		return s;
+		/* 纯 ASCII 也走一遍「双引号和反斜杠要转义」——
+		 * 字库里出现 ' " ' 的机会不大，但真出现了，原样返回会把这个
+		 * 字符串字面量提前截断，编译报错却看不出跟这个工具有关。 */
+		QString plain;
+		for (const QChar ch : s)
+		{
+			if (ch == QLatin1Char('"') || ch == QLatin1Char('\\'))
+			{
+				plain += QLatin1Char('\\');
+			}
+			plain += ch;
+		}
+		return plain;
 	}
 
 	QString out;
@@ -1058,14 +1070,14 @@ bool detect(const QString &fontHeaderPath,
 			{
 				/* 示例串按 \xE5\xBC\xA0 这种字节转义写进去，源码里不留中文字节。
 				 * 屏幕效果一模一样，但 Keil 保存时把 BOM 弄丢也不会报 #8
-				 * （详见 cStringInner 的注释）。 */
+				 * （详见 cStringOf 的注释）。 */
 				QStringList body;
 				body << QStringLiteral("\tOLED_CFont_ShowString( 1, 1, \"%1\" );")
-				            .arg(cStringInner(sample1));
+				            .arg(cStringOf(sample1));
 				if (!sample2.isEmpty())
 				{
 					body << QStringLiteral("\tOLED_CFont_ShowString( 2, 1, \"%1\" );")
-					            .arg(cStringInner(sample2));
+					            .arg(cStringOf(sample2));
 				}
 
 				Step s;
@@ -1074,12 +1086,12 @@ bool detect(const QString &fontHeaderPath,
 				s.text      = body.join(QLatin1Char('\n'));
 				s.title     = QStringLiteral("%1：补 %2 行示例调用").arg(mainName).arg(body.size());
 				QString shown;
-				if (cStringInner(sample1) != sample1)
+				if (cStringOf(sample1) != sample1)
 				{
 					shown = QStringLiteral("示例串在源码里写成 \"%1\" 这种字节转义，"
 					                       "屏幕上显示的还是「%2」。这样写源码里没有中文字节，"
 					                       "Keil 保存时把 BOM 弄丢也不会报 #8。")
-					            .arg(cStringInner(sample1), sample1);
+					            .arg(cStringOf(sample1), sample1);
 				}
 				s.detail    = QStringLiteral("加在 %1(); 之后（第 %2 行后）。"
 				                             "如果下面还有别的 OLED_ShowXxx 会覆盖同一行，"
