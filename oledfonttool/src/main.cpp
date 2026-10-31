@@ -3031,6 +3031,7 @@ void MainWindow::checkSourceEncoding(bool popupOnProblem)
 
 	QStringList checked;        /* 有中文字符串的文件 */
 	QStringList mismatch;       /* 编码不匹配的文件 */
+	QStringList noBom;          /* 是 UTF-8 但没带 BOM 的文件 */
 	QStringList details;
 
 	/* 递归找工程里的 .c / .h —— 不依赖子目录叫什么名字。
@@ -3082,6 +3083,11 @@ void MainWindow::checkSourceEncoding(bool popupOnProblem)
 			{
 				mismatch << QStringLiteral("%1（%2）示例：\"%3\"").arg(name, enc, sample);
 			}
+			else if (!enc.endsWith(QLatin1String("BOM")))
+			{
+				/* UTF-8 但没 BOM：查表对得上，可 armcc 解析这一关就过不去 */
+				noBom << name;
+			}
 	}
 
 	if (checked.isEmpty())
@@ -3094,12 +3100,42 @@ void MainWindow::checkSourceEncoding(bool popupOnProblem)
 		return;
 	}
 
-	if (mismatch.isEmpty())
+	if (mismatch.isEmpty() && noBom.isEmpty())
 	{
 		m_encStatus->setText(QStringLiteral("源码编码：✓ 正常（%1）")
 		                     .arg(details.join(QStringLiteral("、"))));
 		log << QStringLiteral("结果: 正常");
 		writeEncodingLog(log);
+		return;
+	}
+
+	/* 是 UTF-8 但没 BOM —— 查表没问题，armcc 解析就过不去 */
+	const QString bomHint = QStringLiteral(
+		"这些源文件是 UTF-8，但没带 BOM：\n\n%1\n\n"
+		"armcc（Keil AC5）不看内容判编码，一律按系统代码页（GBK）当双字节解析。\n"
+		"汉字 UTF-8 三字节的最后一位常落在 GBK 的引导字节区间，会把后面那个\n"
+		"引号当成它的一半吞掉，于是编译报：\n\n"
+		"    error:  #8: missing closing quote\n"
+		"    error:  #18: expected a \")\"\n\n"
+		"解决办法（任选一个）：\n"
+		"  1. 给这些文件补 UTF-8 BOM（scripts\\add_bom.py 可以批量补；\n"
+		"     用本工具「一键接入工程」写回时也会自动补）\n"
+		"  2. 或者工程 C/C++ → Misc Controls 加 --locale=english，\n"
+		"     整工程改成按直通字节处理，不再套本地代码页\n\n"
+		"工程用 AC6（armclang）的话默认就按 UTF-8 读源码，这条可以忽略。")
+		.arg(noBom.join(QStringLiteral("、")));
+
+	if (mismatch.isEmpty())
+	{
+		m_encStatus->setText(QStringLiteral("⚠ %1 是 UTF-8 但缺 BOM，AC5 会报 #8")
+		                     .arg(noBom.join(QStringLiteral("、"))));
+		log << QStringLiteral("结果: 缺 BOM -> %1").arg(noBom.join(QStringLiteral("; ")));
+		writeEncodingLog(log);
+
+		if (popupOnProblem)
+		{
+			QMessageBox::warning(this, QStringLiteral("源码是 UTF-8 但缺 BOM"), bomHint);
+		}
 		return;
 	}
 
@@ -3117,11 +3153,17 @@ void MainWindow::checkSourceEncoding(bool popupOnProblem)
 	                     .arg(mismatch.join(QStringLiteral("、"))));
 
 	log << QStringLiteral("结果: 不匹配 -> %1").arg(mismatch.join(QStringLiteral("; ")));
+	if (!noBom.isEmpty())
+	{
+		log << QStringLiteral("另有缺 BOM -> %1").arg(noBom.join(QStringLiteral("; ")));
+	}
 	writeEncodingLog(log);
 
 	if (popupOnProblem)
 	{
-		QMessageBox::warning(this, QStringLiteral("源码编码和字库不一致"), msg);
+		/* 两件事一起说：只说编码不对，用户改完 UTF-8 还会撞上缺 BOM 这一关 */
+		const QString full = noBom.isEmpty() ? msg : msg + QStringLiteral("\n\n") + bomHint;
+		QMessageBox::warning(this, QStringLiteral("源码编码和字库不一致"), full);
 	}
 }
 

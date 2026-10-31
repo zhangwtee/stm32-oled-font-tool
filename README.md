@@ -599,11 +599,43 @@ bootloader），这时型号还是 ZE，但可用空间已经不是 512KB 了 �
 图片 / 动画页的占用提示也跟着这个容量走：同样是 20 KB，在 64 KB 的芯片上占 31%
 （橙色警告），在 512 KB 上只占 3.9%（绿色）。
 
-## 一处硬要求
+## 一处硬要求：UTF-8，而且**带 BOM**
 
 `OLED_CFont.h` 必须写成 **UTF-8**，且 Keil 的
 `Edit → Configuration → Encoding` 要选 **UTF-8**。工具已经按 UTF-8 写出，
 但如果你用别的编辑器打开再保存，可能被转成 GBK，字库就会查不到。
+
+更麻烦的是另一半：**你自己的 `main.c` 也必须带 UTF-8 BOM。**
+
+Keil 的编译器 armcc（AC5）不看文件内容判编码，一律按系统代码页（中文系统是 GBK）
+当双字节解析。汉字在 UTF-8 里是三字节，比如「张」= `E5 BC A0`，最后那个 `A0`
+落在 GBK 的引导字节区间，它会把后面那个**引号**当成自己的第二字节吞掉，于是：
+
+```c
+OLED_CFont_ShowString( 3, 4, "张" );    /* 源码里看着没问题 */
+```
+```
+User\main.c(12): error:  #8: missing closing quote
+OLED_CFont_ShowString( 3, 4, "寮?" );
+User\main.c(14): error:  #18: expected a ")"
+```
+
+报错行号会飘到下一行语句上，而且文件本身完全合法 —— 纯粹是编译器读错了字节。
+注意 Keil 编辑器里 Encoding 选 UTF-8 时，它保存出来的文件是**不带 BOM** 的，
+所以照上面那句设置完，中文串反而编不过，很容易以为是工具导出的字库坏了。
+
+两个解法，任选一个：
+
+1. **给源文件补 UTF-8 BOM**（推荐）。`scripts\add_bom.py main.c` 就行；
+   用本工具「一键接入工程」写回时也会自动补（写中文时才补，纯 ASCII 的文件不动）。
+2. 工程 `Options → C/C++ → Misc Controls` 加 `--locale=english`。
+   这会让 armcc 不再套本地代码页，UTF-8 字节原样通过。改一次整工程有效。
+
+两条都用 AC5.06u5 实测过：`--locale=english` 和不带 BOM 的 UTF-8 各编一遍，
+前者过、后者报上面那两个错；加 BOM 后编出来的目标文件里，字符串就是 `E5 BC A0`，
+和字库的键对得上。
+
+另外，AC6（armclang）默认按 UTF-8 读源码，不受这条影响。
 
 ## PC 上验证 OLED 驱动（不用真机）
 

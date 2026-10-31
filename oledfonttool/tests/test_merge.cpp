@@ -223,6 +223,72 @@ int main(int argc, char **argv)
 		check("没有备份 -> 文件没被动过", readFile(mainC) == keep, QString());
 	}
 
+	std::printf("[UTF-8 无 BOM 时自动补 BOM]\n");
+	{
+		/* 现场：Keil 里 Edit → Configuration → Encoding 选 UTF-8 之后保存的文件
+		 * 是不带 BOM 的。「一键接入」往里写中文示例，armcc 按 GBK 解析，
+		 * 汉字三字节的最后一字节把引号吞掉，报 #8: missing closing quote。
+		 * 所以写回时看到"UTF-8 + 内容里有非 ASCII + 原来没 BOM"就补一个。 */
+		const QByteArray plainNoBom("#include \"stm32f10x.h\"\n"
+		                            "\n"
+		                            "int main(void)\n"
+		                            "{\n"
+		                            "    OLED_Init();\n"
+		                            "}\n");
+
+		const QString nobom = root + QStringLiteral("/User/main2.c");
+		writeFile(nobom, plainNoBom);
+
+		MergeProject::Scan scan;
+		scan.root = root;
+		MergeProject::Step s;
+		s.file      = nobom;
+		s.afterLine = 5;
+		s.text      = QStringLiteral("\tOLED_CFont_ShowString( 1, 1, \"张\" );");
+		s.title     = QStringLiteral("测试插入中文");
+		s.checked   = true;
+		scan.steps << s;
+
+		QStringList touched;
+		QString err;
+		const bool ok = MergeProject::apply(scan, &touched, &err);
+		check("往无 BOM 的 UTF-8 文件里写中文 -> 成功", ok, err);
+
+		const QByteArray after = readFile(nobom);
+		check("写回后补上了 BOM", after.startsWith("\xEF\xBB\xBF"),
+		      QString::fromLatin1(after.left(6).toHex(' ')));
+		check("BOM 只出现一次", after.count("\xEF\xBB\xBF") == 1,
+		      QString::number(after.count("\xEF\xBB\xBF")));
+		check("中文按 UTF-8 写入（E5 BC A0）", after.contains("\xE5\xBC\xA0"), QString());
+		check("BOM 后面还是原来的第一行",
+		      after.mid(3).startsWith("#include \"stm32f10x.h\""),
+		      QString::fromUtf8(after.left(40)));
+
+		/* 纯 ASCII 的文件不许动 —— 老工程不该平白多出三个字节 */
+		const QString ascii = root + QStringLiteral("/User/main3.c");
+		writeFile(ascii, plainNoBom);
+
+		MergeProject::Scan scan2;
+		scan2.root = root;
+		MergeProject::Step s2;
+		s2.file      = ascii;
+		s2.afterLine = 0;
+		s2.text      = QStringLiteral("#include \"OLED_CFont.h\"");
+		s2.title     = QStringLiteral("测试插入 ASCII");
+		s2.checked   = true;
+		scan2.steps << s2;
+
+		QStringList t2;
+		QString e2;
+		check("纯 ASCII 文件插入成功", MergeProject::apply(scan2, &t2, &e2), e2);
+
+		const QByteArray a2 = readFile(ascii);
+		check("纯 ASCII 文件不加 BOM", !a2.startsWith("\xEF\xBB\xBF"),
+		      QString::fromLatin1(a2.left(6).toHex(' ')));
+		check("纯 ASCII 文件里新行在第一行",
+		      a2.startsWith("#include \"OLED_CFont.h\""), QString::fromUtf8(a2.left(40)));
+	}
+
 	std::printf("\n%d passed, %d failed\n", g_pass, g_fail);
 	return g_fail == 0 ? 0 : 1;
 }

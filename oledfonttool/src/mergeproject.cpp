@@ -92,6 +92,19 @@ static Enc detectEnc(const QByteArray &raw)
 	return isValidUtf8(raw) ? EncUtf8 : EncGbk;
 }
 
+/* 有没有非 ASCII 字节 —— 用来判断"要不要为这个文件补 BOM" */
+static bool hasNonAsciiByte(const QByteArray &b)
+{
+	for (const char c : b)
+	{
+		if (static_cast<unsigned char>(c) > 127)
+		{
+			return true;
+		}
+	}
+	return false;
+}
+
 /* QString -> 目标编码字节。GBK 走 Win32 代码页 936，不额外依赖 Qt 模块 */
 static QByteArray encodeTo(const QString &s, Enc e)
 {
@@ -1088,7 +1101,26 @@ bool apply(const Scan &scan, QStringList *touched, QString *err)
 			}
 			return false;
 		}
-		out.write(bom + joinLines(lines, eol));
+		QByteArray bytes = joinLines(lines, eol);
+
+		/* 原来就有 BOM 的，照旧补回去。
+		 * 原来没有 BOM、但这次写进去的内容里有中文（UTF-8 字节），就补一个：
+		 * armcc（Keil AC5）不看文件内容判编码，一律按系统代码页（GBK）当双字节走。
+		 * 汉字的 UTF-8 三字节最后一位常落在 GBK 的引导字节区间，
+		 * 会把后面那个引号当成第二字节吞掉，编译直接报：
+		 *     error:  #8: missing closing quote
+		 * 文件开头带 BOM，armcc 才改按 UTF-8 解析（实测 AC5.06u5）。
+		 * 纯 ASCII 的源文件不动 —— 没必要给老工程平白多加三个字节。 */
+		if (!bom.isEmpty())
+		{
+			bytes.prepend(bom);
+		}
+		else if (enc == EncUtf8 && hasNonAsciiByte(bytes))
+		{
+			bytes.prepend("\xEF\xBB\xBF");
+		}
+
+		out.write(bytes);
 		if (!out.commit())
 		{
 			if (err)
