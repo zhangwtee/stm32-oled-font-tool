@@ -55,6 +55,7 @@ void FontGen::resolveCjkFont()
 	{
 		m_cjkFont = m_font;
 		m_cjkSubstituted = false;
+		detectCjkNoAa();
 		return;
 	}
 
@@ -69,6 +70,7 @@ void FontGen::resolveCjkFont()
 		"楷体", "KaiTi",
 	};
 
+	m_cjkFont = QFont();
 	for (const char *name : cands)
 	{
 		QFont f(QString::fromUtf8(name));
@@ -78,6 +80,7 @@ void FontGen::resolveCjkFont()
 		{
 			m_cjkFont = f;
 			m_cjkSubstituted = true;
+			detectCjkNoAa();
 			return;
 		}
 	}
@@ -87,6 +90,73 @@ void FontGen::resolveCjkFont()
 	m_cjkFont.setPixelSize(m_size);
 	m_cjkFont.setWeight(QFont::Normal);
 	m_cjkSubstituted = true;
+	detectCjkNoAa();
+}
+
+/*
+ * 这个字体在这个字号下，是"自带点阵"还是"拿轮廓缩放"。
+ *
+ * 判别办法：照常抗锯齿画一遍，数一数墨迹像素里有多少是中间灰
+ * （既不是全黑也不是全白）。自带点阵的字形只有 0 和 255，中间灰占比是 0；
+ * 轮廓缩放的笔画宽不到一个像素，边缘全是半灰，占比在 50~60%。
+ *
+ * 实测（本机，四个探测字取平均）：
+ *             16px  24px  32px
+ *   华文宋体    60%   58%   51%
+ *   宋体         0%   68%   59%      <- 只有 16px 那格是内嵌点阵
+ *   微软雅黑    61%   58%   48%
+ *   黑体        57%   57%   51%
+ *
+ * 所以分界取 12%：两头都留着四十多个点的余量，不会在边界上来回跳。
+ */
+void FontGen::detectCjkNoAa()
+{
+	m_cjkNoAa = false;
+	if (m_cjkFont.family().isEmpty())
+	{
+		return;
+	}
+
+	/* 笔画太少的字（一、十）在哪个字号下都近乎纯黑白，测不出东西，
+	 * 所以挑三个笔画密、结构复杂的。 */
+	static const ushort probes[] = { 0x5D4C, 0x6E29, 0x7F51 };   /* 嵌 温 网 */
+
+	const int S = m_size;
+	int mid = 0, ink = 0;
+	for (ushort u : probes)
+	{
+		QImage img(S, S, QImage::Format_Grayscale8);
+		img.fill(0);
+		{
+			QPainter p(&img);
+			p.setRenderHint(QPainter::TextAntialiasing, true);
+			p.setFont(m_cjkFont);
+			p.setPen(Qt::white);
+			p.drawText(QRect(0, 0, S, S), Qt::AlignLeft | Qt::AlignTop, QString(QChar(u)));
+		}
+		for (int y = 0; y < S; ++y)
+		{
+			const uchar *line = img.constScanLine(y);
+			for (int x = 0; x < S; ++x)
+			{
+				if (line[x] > 0)
+				{
+					++ink;
+					/* 容一点边界：1~24 和 231~254 差一点点也算实心，
+					 * 免得量化噪声把这套判断带到另一边去 */
+					if (line[x] > 24 && line[x] < 231)
+					{
+						++mid;
+					}
+				}
+			}
+		}
+	}
+
+	if (ink > 0)
+	{
+		m_cjkNoAa = (mid * 100 / ink) > 12;
+	}
 }
 
 QString FontGen::tableName(int size)
@@ -128,21 +198,36 @@ void FontGen::setThreshold(int threshold)
 /*
  * 渲染：N×N 画布上画字 -> 取墨迹边界 -> 整体平移居中 -> 按阈值二值化
  * 平移这一步不能省：宋体的字形在字身框里天然偏左偏上，不居中的话点阵会贴边
+ *
+ * 汉字用的是 m_cjkFont（可能是替换过的那套），ASCII 还用用户选的字体：
+ * 西文字体画字母本来是正常的，没必要一起换掉。
+ *
+ * 关不关抗锯齿看 m_cjkNoAa（见 detectCjkNoAa）：
+ *   自带点阵的字形（宋体 16×16）本来就只有黑白两种值，开不开都一样，走老路；
+ *   轮廓缩放的字体必须关掉，否则笔画边缘全是半灰，阈值切出来的粗细不匀。
+ * 关掉以后图里只有 0 / 255，阈值自然不参与（宋体 16×16 本来也是这样）。
  */
 QVector<QVector<bool>> FontGen::renderBits(QChar ch) const
 {
 	const int S = m_size;
+	const bool ascii = (ch.unicode() < 0x80);
+	const bool noAa = !ascii && m_cjkNoAa;
+
 	QImage img(S, S, QImage::Format_Grayscale8);
 	img.fill(0);
 
-	QPainter p(&img);
-	p.setRenderHint(QPainter::TextAntialiasing, true);
-	/* 汉字用 m_cjkFont（可能是替换过的那套），ASCII 还用用户选的字体：
-	 * 西文字体画字母本来是正常的，没必要一起换掉。 */
-	p.setFont(ch.unicode() < 0x80 ? m_font : m_cjkFont);
-	p.setPen(Qt::white);
-	p.drawText(QRect(0, 0, S, S), Qt::AlignLeft | Qt::AlignTop, QString(ch));
-	p.end();
+	{
+		QFont f = ascii ? m_font : m_cjkFont;
+		if (noAa)
+		{
+			f.setStyleStrategy(QFont::NoAntialias);
+		}
+		QPainter p(&img);
+		p.setRenderHint(QPainter::TextAntialiasing, !noAa);
+		p.setFont(f);
+		p.setPen(Qt::white);
+		p.drawText(QRect(0, 0, S, S), Qt::AlignLeft | Qt::AlignTop, QString(ch));
+	}
 
 	/* 墨迹边界 */
 	int x0 = S, y0 = S, x1 = -1, y1 = -1;
@@ -170,17 +255,19 @@ QVector<QVector<bool>> FontGen::renderBits(QChar ch) const
 
 	QImage moved(S, S, QImage::Format_Grayscale8);
 	moved.fill(0);
-	QPainter p2(&moved);
-	p2.drawImage(dx, dy, img);              /* 平移，超出部分自动裁掉 */
-	p2.end();
+	{
+		QPainter p2(&moved);
+		p2.drawImage(dx, dy, img);              /* 平移，超出部分自动裁掉 */
+	}
 
+	const int thr = noAa ? 1 : m_threshold;
 	QVector<QVector<bool>> bits(S, QVector<bool>(S, false));
 	for (int y = 0; y < S; ++y)
 	{
 		const uchar *line = moved.constScanLine(y);
 		for (int x = 0; x < S; ++x)
 		{
-			bits[y][x] = (line[x] >= m_threshold);
+			bits[y][x] = (line[x] >= thr);
 		}
 	}
 	return bits;

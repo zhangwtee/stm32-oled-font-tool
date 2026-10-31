@@ -992,6 +992,119 @@ int main(int argc, char **argv)
 		check("8px 的点阵还是 8×8", small.glyphBits(QChar(u'嵌')).size() == 8);
 	}
 
+	/* ---------------- 小字号笔画糊：抗锯齿 vs 整像素 ----------------
+	 * 用户报「选华文宋体取模，字是糊的」。查下来不是回退的问题，是渲染：
+	 *
+	 *   宋体 16×16 自带点阵位图，Qt 直接取位图，笔画是整像素的 —— 中间灰占 0%
+	 *   宋体 24/32、华文宋体、微软雅黑、黑体，全是拿轮廓缩放 —— 中间灰占 50~60%
+	 *
+	 * 笔画只有 0.7 像素宽的时候，抗锯齿会把它摊成一片半灰，阈值切在哪儿
+	 * 笔画就在哪儿断、在哪儿变粗，看上去就是糊的。所以这类情况要关掉抗锯齿。
+	 *
+	 * 这里钉四件事：什么时候该关、换字号后会重算、关掉后阈值不参与、
+	 * 以及关掉后点阵里不该再有孤立单点（那正是糊的直观表现）。 */
+	{
+		FontGen s16(QFont(QStringLiteral("SimSun"), 16), 110, 16);
+		check("宋体 16×16 自带点阵，不该关抗锯齿", !s16.cjkNoAa());
+
+		FontGen s24(QFont(QStringLiteral("SimSun"), 16), 110, 24);
+		check("宋体 24×24 是轮廓缩放，要关抗锯齿", s24.cjkNoAa());
+
+		FontGen s32(QFont(QStringLiteral("SimSun"), 16), 110, 32);
+		check("宋体 32×32 也是轮廓缩放，要关抗锯齿", s32.cjkNoAa());
+
+		/* 换字号必须重新判断，否则 24 号切回 16 号还按整像素画 */
+		s24.setSize(16);
+		check("从 24 换回 16，判断跟着回到「自带点阵」", !s24.cjkNoAa());
+
+		/* 整像素渲染后图里只有 0 和 255，阈值没有可切的位置 */
+		FontGen thr(QFont(QStringLiteral("SimSun"), 16), 110, 24);
+		const QVector<QVector<bool>> before = thr.glyphBits(QChar(u'温'));
+		thr.setThreshold(30);
+		check("整像素渲染时改阈值不改变点阵", thr.glyphBits(QChar(u'温')) == before);
+		thr.setThreshold(220);
+		check("阈值拉高也一样（不是被夹到某一边）", thr.glyphBits(QChar(u'温')) == before);
+
+		/* 关抗锯齿只针对汉字，字母数字还走原来的字体和抗锯齿 */
+		FontGen asc(QFont(QStringLiteral("SimSun"), 16), 110, 24);
+		const QVector<QVector<bool>> letter = asc.glyphBits(QChar(u'A'));
+		int inkA = 0;
+		for (int y = 0; y < letter.size(); ++y)
+		{
+			for (int x = 0; x < letter[y].size(); ++x)
+			{
+				if (letter[y][x])
+				{
+					++inkA;
+				}
+			}
+		}
+		check("字母 A 仍然取得到点阵（ASCII 没被一起关掉）", inkA > 8,
+		      QStringLiteral("亮 %1 点").arg(inkA));
+
+		/* 有这几款字体就一并验证：它们在任何字号下都没有内嵌点阵 */
+		const QStringList fams = QFontDatabase::families();
+		const QStringList noBitmap = { QString::fromUtf8("华文宋体"),
+		                               QString::fromUtf8("微软雅黑"),
+		                               QString::fromUtf8("黑体") };
+		for (const QString &name : noBitmap)
+		{
+			if (!fams.contains(name))
+			{
+				continue;
+			}
+			FontGen g(QFont(name, 16), 110, 16);
+			const QByteArray noBitmapMsg =
+			    QStringLiteral("「%1」16×16 没有点阵，要关抗锯齿").arg(name).toUtf8();
+			check(noBitmapMsg.constData(), g.cjkNoAa(), g.cjkFamily());
+			const QByteArray selfMsg =
+			    QStringLiteral("「%1」汉字字体就是它自己").arg(name).toUtf8();
+			check(selfMsg.constData(), !g.cjkSubstituted());
+		}
+
+		/* 糊字最直观的表现就是点阵里散着一堆孤立单点：笔画断开，
+		 * 只留下一个点。整像素渲染后不该再出现。 */
+		if (fams.contains(QString::fromUtf8("华文宋体")))
+		{
+			FontGen hw(QFont(QString::fromUtf8("华文宋体"), 16), 110, 16);
+			const QString probe = QString::fromUtf8("\u5d4c\u7f51\u6e29\u5ea6");  /* 嵌网温度 */
+			int lonely = 0;
+			for (int i = 0; i < probe.size(); ++i)
+			{
+				const QVector<QVector<bool>> b = hw.glyphBits(probe.at(i));
+				const int n = b.size();
+				for (int y = 1; y + 1 < n; ++y)
+				{
+					for (int x = 1; x + 1 < n; ++x)
+					{
+						if (!b[y][x])
+						{
+							continue;
+						}
+						bool neighbour = false;
+						for (int j = -1; j <= 1 && !neighbour; ++j)
+						{
+							for (int i2 = -1; i2 <= 1; ++i2)
+							{
+								if ((i2 || j) && b[y + j][x + i2])
+								{
+									neighbour = true;
+									break;
+								}
+							}
+						}
+						if (!neighbour)
+						{
+							++lonely;
+						}
+					}
+				}
+			}
+			check("华文宋体 16×16 四个字里没有孤立单点（笔画不断）", lonely == 0,
+			      QStringLiteral("%1 个").arg(lonely));
+		}
+	}
+
 	std::printf("\n%d passed, %d failed\n", g_pass, g_fail);
 	return g_fail == 0 ? 0 : 1;
 }

@@ -63,6 +63,17 @@ public:
 	QString cjkFamily() const { return m_cjkFont.family(); }
 	bool cjkSubstituted() const { return m_cjkSubstituted; }
 
+	/* 汉字是否要走"无抗锯齿"渲染。
+	 *
+	 * 有些字体在小字号下自带点阵位图（宋体 16×16 就是），Qt 直接取位图，
+	 * 笔画是整像素的，干净。其余字体（华文宋体、微软雅黑、黑体，以及宋体的
+	 * 24/32 号）都是拿轮廓去缩放，笔画只有 0.7 像素宽，抗锯齿之后边缘全是
+	 * 半灰 —— 阈值切在哪边，笔画就忽粗忽细，看上去就是糊的。
+	 *
+	 * 这种情况关掉抗锯齿让 Qt 按整像素出图，笔画才连得起来。
+	 * 见 FontGen::detectCjkNoAa。 */
+	bool cjkNoAa() const { return m_cjkNoAa; }
+
 	int threshold() const { return m_threshold; }
 	int size() const { return m_size; }
 	int glyphSize() const { return bytesFor(m_size); }   /* 一个字多少字节 */
@@ -102,9 +113,13 @@ private:
 	/* 按当前字体/字号重新判断"汉字该用哪套字体画" */
 	void resolveCjkFont();
 
+	/* 判断汉字要不要走无抗锯齿渲染（这个字体在这个字号下有没有点阵位图） */
+	void detectCjkNoAa();
+
 	QFont m_font;
 	QFont m_cjkFont;                 /* 画汉字用的；m_font 本身有汉字时就是它自己 */
 	bool  m_cjkSubstituted = false;  /* true = 选了字体但没有汉字，已换成别的 */
+	bool  m_cjkNoAa = false;         /* true = 汉字按整像素渲染，不走抗锯齿 */
 	int m_threshold;
 	int m_size;
 	mutable QMap<QChar, QVector<QVector<bool>>> m_cache;   /* const 成员函数里也能写缓存 */

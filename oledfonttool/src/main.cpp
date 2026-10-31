@@ -901,6 +901,13 @@ void MainWindow::buildUi()
 	m_threshold = new QSlider(Qt::Horizontal, thrRow);
 	m_threshold->setRange(40, 200);
 	m_threshold->setValue(110);
+	/* 有些字体/字号下点阵里只有黑白两种值（宋体 16×16 自带点阵位图，
+	 * 其余字体小字号改走整像素渲染），这时候没有"边缘灰度"可切，
+	 * 滑块拖到底点阵也不会变。不说清楚会被当成坏了。 */
+	m_threshold->setToolTip(QStringLiteral(
+	    "笔画边缘的灰度门槛：调小让笔画变粗，调大让笔画变细。\n"
+	    "字体在这个字号下自带点阵位图（例如宋体 16×16），或汉字是按整像素\n"
+	    "渲染的时候，点阵只有黑和白两种值，这个滑块就不参与。"));
 	m_thresholdValue = new QLabel(QStringLiteral("110"), thrRow);
 	m_thresholdValue->setFixedWidth(28);
 	thrLayout->addWidget(m_threshold);
