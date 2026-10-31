@@ -6,6 +6,7 @@
 #include <QComboBox>
 #include <QCoreApplication>
 #include <QDateTime>
+#include <QDesktopServices>
 #include <QDialog>
 #include <QDir>
 #include <QDirIterator>
@@ -44,6 +45,7 @@
 #include <QTextCursor>
 #include <QTextStream>
 #include <QTimer>
+#include <QUrl>
 #include <QVBoxLayout>
 
 #include <algorithm>
@@ -628,6 +630,8 @@ static const char *kQss =
 	"#Title { color: #1F2328; font-size: 16px; font-weight: 600; }"
 	"#Purpose { color: #374151; font-size: 12px; }"
 	"#SubTitle, #Hint { color: #6B7280; font-size: 11px; }"
+	"#RepoLink { color: #6B7280; font-size: 11px; }"
+	"#RepoLink a { color: #1F6FEB; text-decoration: none; }"
 	"#Count { color: #1F6FEB; font-size: 12px; font-weight: 600; }"
 	"#Warn { color: #B45309; background: #FEF3C7; border: 1px solid #FDE68A;"
 	"        border-radius: 4px; padding: 4px 6px; font-size: 11px; }"
@@ -687,6 +691,9 @@ private:
 	 * 中文一律写成 \xE5\xBC\xA0 这种字节转义 —— 源码里没有中文字节，
 	 * Keil 保存时把 BOM 弄丢也不会报 #8。 */
 	void copyAsCString();
+
+	/* 侧栏底部两行仓库地址（GitHub / Gitee），可点击打开浏览器。 */
+	QWidget *makeRepoLinks(QWidget *parent);
 
 	void buildUi();
 	void updateStatus();
@@ -832,6 +839,33 @@ MainWindow::MainWindow()
 	/* 界面搭好了再探屏：探测要读工程里的驱动源码，这时才知道工程在哪。
 	 * 放在后面而不是导出时，是为了让用户一打开就能看见判断结果。 */
 	reprobeScreen();
+}
+
+QWidget *MainWindow::makeRepoLinks(QWidget *parent)
+{
+	/* 两行仓库地址，可点击打开浏览器。用富文本链接（不用 setOpenExternalLinks，
+	 * 那样整段字都会变可点、而且没个"这是个链接"的视觉区分）。 */
+	QWidget *box = new QWidget(parent);
+	QVBoxLayout *lay = new QVBoxLayout(box);
+	lay->setContentsMargins(0, 0, 0, 0);
+	lay->setSpacing(1);
+
+	QLabel *label = new QLabel(box);
+	label->setObjectName(QStringLiteral("RepoLink"));
+	label->setWordWrap(true);
+	label->setMinimumWidth(1);
+	label->setTextInteractionFlags(Qt::TextBrowserInteraction);
+	label->setOpenExternalLinks(false);
+	label->setText(QStringLiteral(
+		"GitHub&nbsp;&nbsp;<a href=\"https://github.com/zhangruodong/stm32-oled-font-tool\">"
+		"github.com/zhangruodong/stm32-oled-font-tool</a><br>"
+		"Gitee&nbsp;&nbsp;<a href=\"https://gitee.com/jingliyanfeizuo/stm32-oled-font-tool\">"
+		"gitee.com/jingliyanfeizuo/stm32-oled-font-tool</a>"));
+	QObject::connect(label, &QLabel::linkActivated, this,
+	                 [](const QString &link) { QDesktopServices::openUrl(QUrl(link)); });
+
+	lay->addWidget(label);
+	return box;
 }
 
 void MainWindow::buildUi()
@@ -1196,6 +1230,9 @@ void MainWindow::buildUi()
 	statusBox->addWidget(m_status);
 	statusBox->addLayout(flashRow);
 	sideLayout->addLayout(statusBox);
+
+	/* 仓库地址：放在最底部，跟上面一堆状态/容量分隔开。 */
+	sideLayout->addWidget(makeRepoLinks(side));
 	connect(m_flashBox, &QComboBox::currentIndexChanged, this, [this]() {
 		updateStatus();
 		updateImageInfo();          /* 图片页那句「放不下几秒」也跟着变 */
@@ -1454,6 +1491,9 @@ QWidget *MainWindow::buildImagePage()
 		"再补一行「刷第 0 帧」的调用（插在 OLED_Init 之后，不动 while 循环）。\n"
 		"只插入不改已有行，写盘前能逐条预览，每个文件留 .oledbak 可撤销。"));
 	sideLayout->addWidget(mergeAssetBtn);
+
+	/* 仓库地址：和文字页一样放最底部。 */
+	sideLayout->addWidget(makeRepoLinks(side));
 
 	/* 右侧预览 */
 	m_imgPreview = new ImagePreview(this);
