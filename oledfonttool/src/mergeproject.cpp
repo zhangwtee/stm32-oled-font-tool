@@ -231,6 +231,11 @@ QString cStringOf(const QString &s)
 			{
 				plain += QLatin1Char('\\');
 			}
+			else if (ch == QLatin1Char('\t'))
+			{
+				plain += QStringLiteral("\\t");
+				continue;
+			}
 			plain += ch;
 		}
 		return plain;
@@ -254,6 +259,14 @@ QString cStringOf(const QString &s)
 			if (c == '"' || c == '\\')
 			{
 				out += QLatin1Char('\\');
+			}
+			else if (c == '\t')
+			{
+				/* tab 原样塞进字符串会变成一个看不见的字节，屏幕上还可能
+				 * 显示成乱码格。转成 \t 让用户一眼看出那里有个制表符。 */
+				out += QStringLiteral("\\t");
+				prevHex = false;
+				continue;
 			}
 			out += QLatin1Char(static_cast<char>(c));
 			prevHex = false;

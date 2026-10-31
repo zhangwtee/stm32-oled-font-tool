@@ -287,6 +287,8 @@ int main(int argc, char **argv)
 			{ "中文后跟十六进制字符",  "\xE5\xBC\xA0" "A", "\\xE5\\xBC\\xA0" "\"\"A" },
 			{ "双引号要转义",          "a\"b", "a\\\"b" },
 			{ "反斜杠要转义",          "a\\b", "a\\\\b" },
+			{ "纯 ASCII 里的 tab 转义",   "a\tb", "a\\tb" },
+			{ "中英混排里的 tab 转义",    "a\t\xE5\xBC\xA0", "a\\t\\xE5\\xBC\\xA0" },
 		};
 		for (const Case &c : cases)
 		{

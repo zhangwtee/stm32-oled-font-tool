@@ -4239,7 +4239,9 @@ void MainWindow::copyAsCString()
 	                  .arg(static_cast<int>(code.size()));
 
 	/* 行宽超了也提醒：超宽的字在 ShowGlyph 里被静默跳过，编译通过、屏幕不显示，
-	 * 比行数超了更隐蔽（行数超了整行不写，行宽超了是行尾缺几个字）。 */
+	 * 比行数超了更隐蔽（行数超了整行不写，行宽超了是行尾缺几个字）。
+	 * 只报"第几行超了"，不报"一行最多几个字"——那个数字只在纯汉字时成立，
+	 * 混了 ASCII 就不准，报出来反而误导（屏宽固定 128，剩下让用户自己掂量）。 */
 	QStringList wide;
 	for (int i = 0; i < code.size() && i < overflowAt.size(); ++i)
 	{
@@ -4250,11 +4252,8 @@ void MainWindow::copyAsCString()
 	}
 	if (!wide.isEmpty())
 	{
-		msg += QStringLiteral("。%1超出屏宽（%2×%2 的字一行最多 %3 个），"
-		                      "行尾多出来的字不会显示")
-		           .arg(wide.join(QStringLiteral("、")))
-		           .arg(m_gen.size())
-		           .arg(screenW / glyphW);
+		msg += QStringLiteral("。%1超出屏宽（128 像素），行尾多出来的字不会显示")
+		           .arg(wide.join(QStringLiteral("、")));
 	}
 
 	if (code.size() > maxLine)
