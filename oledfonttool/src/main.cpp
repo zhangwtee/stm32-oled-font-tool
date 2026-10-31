@@ -631,7 +631,7 @@ static const char *kQss =
 	"#Purpose { color: #374151; font-size: 12px; }"
 	"#SubTitle, #Hint { color: #6B7280; font-size: 11px; }"
 	"#RepoLink { color: #374151; font-size: 12px; }"
-	"#RepoLink a { color: #0969DA; text-decoration: underline; }"
+	"#RepoLink a { color: #0B5394; text-decoration: underline; }"
 	"#Count { color: #1F6FEB; font-size: 12px; font-weight: 600; }"
 	"#Warn { color: #B45309; background: #FEF3C7; border: 1px solid #FDE68A;"
 	"        border-radius: 4px; padding: 4px 6px; font-size: 11px; }"
