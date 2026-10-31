@@ -53,6 +53,30 @@ public:
     static int bytesPerFrame(int w, int h) { return w * (h / 8); }
     static int flashBytes(int w, int h, int frames) { return bytesPerFrame(w, h) * frames; }
 
+    /* 一份素材在 Flash 里占多少。界面那边每份素材各存各的尺寸和帧数，
+     * 这里只取算总量用得上的三个数，不牵扯界面结构。 */
+    struct Footprint
+    {
+        int width  = 0;
+        int height = 0;
+        int frames = 0;   /* 实际会导出的帧数（抽帧之后），不是 GIF 原始帧数 */
+    };
+
+    struct Usage
+    {
+        int    frames = 0;
+        qint64 bytes  = 0;
+    };
+
+    /*
+     * 列表里全部素材加起来占多少。
+     *
+     * 必须逐份算完再相加：列表允许混着装 —— 128×64 的动画和 16×16 的图标
+     * 可以同时在里头，每帧字节数差 32 倍。拿最后一份的每帧字节乘总帧数，
+     * 得到的数看着像那么回事，其实是假的。
+     */
+    static Usage totalUsage(const QVector<Footprint> &items);
+
     /*
      * 把任意尺寸的图片变成目标尺寸的灰度图。
      * stretch=false 时等比缩放后居中留黑边，避免变形。

@@ -792,6 +792,7 @@ private:
 	ImagePreview                *m_imgPreview;
 	QListWidget                 *m_imgList;
 	QLabel                      *m_imgFileLabel;
+	QLabel                      *m_imgTotal;    /* 列表合计：几份素材一共占多少 Flash */
 	QLabel                      *m_imgInfo;
 	QComboBox                   *m_imgSize;
 	QComboBox                   *m_imgScale;
@@ -1314,6 +1315,16 @@ QWidget *MainWindow::buildImagePage()
 	listBtnRow->addStretch(1);
 	fileLayout->addLayout(listBtnRow);
 
+	/* 列表合计：单独占一行，紧贴着列表 —— 一次导入十来张图的时候，
+	 * 要回答的是"这些一共占多少"，而不是"选中的这一张占多少"。
+	 * 只有一份素材时不显示：那一份的数字下面的详情里已经写了，
+	 * 再挂一行一模一样的数会让人以为算了两次。 */
+	m_imgTotal = new QLabel(boxFile);
+	m_imgTotal->setObjectName(QStringLiteral("Hint"));
+	m_imgTotal->setWordWrap(true);
+	m_imgTotal->setMinimumWidth(1);
+	fileLayout->addWidget(m_imgTotal);
+
 	m_imgFileLabel = new QLabel(QStringLiteral("（还没有素材）"), boxFile);
 	m_imgFileLabel->setObjectName(QStringLiteral("PathLabel"));
 	m_imgFileLabel->setWordWrap(true);
@@ -1574,6 +1585,21 @@ static QString assetDetailText(const ImageAsset &a)
 		s += QLatin1Char('\n') + a.note;
 	}
 	return s;
+}
+
+/* 字节数说成人话。素材合计常见是几百字节到几十 KB：
+ * 一律报 KB 会出现「0.4 KB」这种不好比的数，一律报字节又长又难读。 */
+static QString byteSizeText(qint64 bytes)
+{
+	if (bytes < 1024)
+	{
+		return QStringLiteral("%1 字节").arg(bytes);
+	}
+	if (bytes < 1024 * 1024)
+	{
+		return QStringLiteral("%1 KB").arg(bytes / 1024.0, 0, 'f', 1);
+	}
+	return QStringLiteral("%1 MB").arg(bytes / (1024.0 * 1024.0), 0, 'f', 2);
 }
 
 /* 导入时被截断或读不出文件，要说清楚为什么。
@@ -1851,7 +1877,12 @@ void MainWindow::refreshAssetItem(int row)
 	                  .arg(a.opt.width)
 	                  .arg(a.opt.height));
 
-	QString tip = a.files.join(QStringLiteral("\n"));
+	QString tip = QStringLiteral("%1 帧 × %2 字节 = %3")
+	                  .arg(a.packed.size())
+	                  .arg(ImageGen::bytesPerFrame(a.opt.width, a.opt.height))
+	                  .arg(byteSizeText(qint64(ImageGen::bytesPerFrame(a.opt.width, a.opt.height))
+	                                    * a.packed.size()));
+	tip += QLatin1Char('\n') + a.files.join(QStringLiteral("\n"));
 	if (!a.note.isEmpty())
 	{
 		tip += QLatin1Char('\n') + a.note;
@@ -1975,6 +2006,70 @@ void MainWindow::recomputeImage()
 
 void MainWindow::updateImageInfo()
 {
+	/* ---- 列表合计 ----
+	 * 一次导入十来张图时，要回答的是「这些一共占多少」，不是「选中的这张占多少」。
+	 * 所以这一行不看选中项，只要列表里有素材就重算 —— 加、删、清空、改尺寸、
+	 * 改抽帧都会走到这里。
+	 * 不到两份就不显示：那一份的数字下面的详情里已经写了，再挂一行
+	 * 一模一样的数会让人以为算了两次。 */
+	{
+		QVector<ImageGen::Footprint> items;
+		items.reserve(m_assets.size());
+		for (const ImageAsset &x : m_assets)
+		{
+			const ImageGen::Footprint f = { x.opt.width, x.opt.height,
+			                                static_cast<int>(x.packed.size()) };
+			items.append(f);
+		}
+		const ImageGen::Usage all = ImageGen::totalUsage(items);
+
+		if (m_imgTotal)
+		{
+			if (m_assets.size() < 2)
+			{
+				/* 藏起来而不是只清文字：空 QLabel 仍然占一行高度，
+				 * 单份素材时按钮和文件名之间就多出一道说不清来历的空白。 */
+				m_imgTotal->clear();
+				m_imgTotal->setToolTip(QString());
+				m_imgTotal->setVisible(false);
+			}
+			else
+			{
+				const qint64 cap = flashCapacity();
+				const double pct = (cap > 0) ? (all.bytes * 100.0 / cap) : 0.0;
+				/* 分成两行写：侧栏只有 340 像素宽，拼成一行会剩一个「下」字
+				 * 单独掉到第二排，比多占一行还难看。 */
+				QString s = QStringLiteral("共 %1 份素材 · %2 帧 · %3")
+				                .arg(m_assets.size())
+				                .arg(all.frames)
+				                .arg(byteSizeText(all.bytes));
+				/* 超出容量时不再说「占 187%」—— 那句话帮不上忙，直接说装不下 */
+				if (cap > 0 && all.bytes > cap)
+				{
+					s += QLatin1Char('\n')
+					     + QStringLiteral("⚠ 超出 %1，装不下").arg(ChipInfo::formatSize(cap));
+				}
+				else if (cap > 0)
+				{
+					s += QLatin1Char('\n')
+					     + QStringLiteral("占 %1 的 %2%")
+					           .arg(ChipInfo::formatSize(cap))
+					           .arg(pct, 0, 'f', 1);
+					if (pct >= 40.0)
+					{
+						s += QStringLiteral(" ⚠");
+					}
+				}
+				m_imgTotal->setText(s);
+				m_imgTotal->setVisible(true);
+				m_imgTotal->setToolTip(QStringLiteral(
+					"按每份素材各自的尺寸算完再相加：128×64 一帧 1024 字节，\n"
+					"16×16 一帧 32 字节，列表里可以混着放。\n"
+					"改哪一份的尺寸或抽帧，这里都跟着变。"));
+			}
+		}
+	}
+
 	const ImageAsset *a = currentAsset();
 
 	if (!a || a->packed.isEmpty())
@@ -2056,25 +2151,7 @@ void MainWindow::updateImageInfo()
 		            .arg(a->delayMs);
 	}
 
-	/* 有多份素材时，单看这一份算不出整个工程的占用，补一行合计 */
-	if (m_assets.size() > 1)
-	{
-		int allFrames = 0;
-		qint64 allBytes = 0;
-		for (const ImageAsset &x : m_assets)
-		{
-			allFrames += x.packed.size();
-			allBytes  += qint64(ImageGen::bytesPerFrame(x.opt.width, x.opt.height))
-			             * x.packed.size();
-		}
-		const double allPct = (cap > 0) ? (allBytes * 100.0 / cap) : 0.0;
-		html += QStringLiteral("<br/>列表里共 %1 份素材：%2 帧、%3 KB（占 %4）")
-		            .arg(m_assets.size())
-		            .arg(allFrames)
-		            .arg(allBytes / 1024.0, 0, 'f', 1)
-		            .arg(cap > 0 ? QStringLiteral("%1%").arg(allPct, 0, 'f', 1)
-		                         : QStringLiteral("—"));
-	}
+	/* 合计挪到列表下面单独一行（见函数开头），这里不再重复说一遍 */
 
 	m_imgInfo->setText(html);
 }

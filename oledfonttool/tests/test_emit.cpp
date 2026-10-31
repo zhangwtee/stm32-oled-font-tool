@@ -1250,6 +1250,45 @@ int main(int argc, char **argv)
 		check("图片反白时文件头写明", ih1.contains(QStringLiteral("反白")));
 	}
 
+	/* ---------------- 多份素材合计 ----------------
+	 * 这一行是拿去判断「装不装得下」的，算错了用户会带着超容量的字库去烧。
+	 * 列表允许混装不同尺寸，所以盯的是「每份按自己的尺寸算」这一条。
+	 */
+	std::printf("[多份素材合计]\n");
+	{
+		const ImageGen::Usage empty = ImageGen::totalUsage(QVector<ImageGen::Footprint>());
+		check("没有素材时合计为 0", empty.frames == 0 && empty.bytes == 0);
+
+		QVector<ImageGen::Footprint> items;
+		items.append({ 128, 64, 24 });    /* 1024 字节/帧 */
+		items.append({ 64, 64, 1 });      /*  512 字节/帧 */
+		items.append({ 16, 16, 30 });     /*   32 字节/帧 */
+		const ImageGen::Usage u = ImageGen::totalUsage(items);
+		check("合计帧数 = 各份帧数相加", u.frames == 55, QString::number(u.frames));
+		const qint64 want = 128 * 8 * 24 + 64 * 8 * 1 + 16 * 2 * 30;
+		check("合计字节 = 每份按自己的尺寸算完再相加", u.bytes == want,
+		      QStringLiteral("%1，应为 %2").arg(u.bytes).arg(want));
+
+		/* 反例：拿最大那份的每帧字节乘总帧数会得到 55 × 1024 = 56320，
+		 * 比真实值大得多。这条就是防有人图省事写成"取一份的每帧字节" */
+		check("合计不等于「某一帧字节 × 总帧数」", u.bytes != qint64(128 * 8) * u.frames);
+
+		QVector<ImageGen::Footprint> zero;
+		zero.append({ 128, 64, 0 });      /* 抽帧抽到一帧不剩，或者读图失败 */
+		const ImageGen::Usage z = ImageGen::totalUsage(zero);
+		check("帧数为 0 的素材不占字节", z.frames == 0 && z.bytes == 0);
+
+		/* 合并成一个动画的只是其中一种用法；各存一份时总帧数一样、尺寸可能不一样，
+		 * 所以同样帧数下字节数只由尺寸决定 */
+		QVector<ImageGen::Footprint> one;
+		one.append({ 128, 64, 10 });
+		QVector<ImageGen::Footprint> two;
+		two.append({ 128, 64, 5 });
+		two.append({ 128, 64, 5 });
+		check("同样帧数、同样尺寸，拆成两份与合成一份占地相同",
+		      ImageGen::totalUsage(one).bytes == ImageGen::totalUsage(two).bytes);
+	}
+
 	std::printf("\n%d passed, %d failed\n", g_pass, g_fail);
 	return g_fail == 0 ? 0 : 1;
 }

@@ -11,6 +11,25 @@
 
 #include <algorithm>
 
+/*
+ * 多份素材的 Flash 合计。
+ *
+ * 逐份按自己的尺寸算每帧字节再相加 —— 列表里 128×64 和 16×16 可以混着放，
+ * 两者每帧差 32 倍。用同一个"每帧字节"去乘总帧数会得到一个看着合理、
+ * 其实对不上的数，而这一行正是拿去判断"装不装得下"的。
+ */
+ImageGen::Usage ImageGen::totalUsage(const QVector<Footprint> &items)
+{
+    Usage u;
+    for (const Footprint &f : items)
+    {
+        const int frames = qMax(0, f.frames);
+        u.frames += frames;
+        u.bytes  += qint64(bytesPerFrame(f.width, f.height)) * frames;
+    }
+    return u;
+}
+
 /* 4x4 有序抖动矩阵（Bayer）。值 0..15，用来把灰度转成"疏密不同的点" */
 static const int kBay4[4][4] = {
     {  0,  8,  2, 10 },
