@@ -248,6 +248,10 @@ while (1);
   （各自一套宏、数组、`Xxx_ShowFrame()`，不合成一段动画），只有「适配区」
   是全文件共用的一份。每份点阵数组的正上方会注明**导入时的文件名**，
   隔几天回来能认出哪个数组是哪张图。默认文件名 `oled_assets.h`。
+- 「一键接入工程…」把上面导出的那个 `.h` 直接接进 Keil 工程：驱动头补函数声明、
+  `main.c` 补 `#include`、再补一行 `Xxx_ShowFrame(0)`（插在 `OLED_Init()` 之后，
+  先刷第 0 帧看接线和图对不对）。写盘前能逐条预览，每个文件留 `.oledbak` 可撤销，
+  执行和撤销都跟文字页那个是同一套。细节见文末「一键接入工程」。
 
 **每份头文件的宏和函数都带素材名前缀**：`logo` 导出来就是 `LOGO_WIDTH`、
 `Logo_ShowFrame`、`LOGO_COUNT`，include guard 也是 `__LOGO_FRAMES_H`。
@@ -500,14 +504,25 @@ static const uint8_t *OLED_CFont_Find(const char *utf8)
 
 ## 一键接入工程
 
-上面那些步骤（驱动头文件补声明、`main.c` 补 `#include`、补两行示例）不用手工做。
-主界面「导出」组里点 **一键接入工程…**：
+上面那些步骤（驱动头文件补声明、`main.c` 补 `#include`、补示例）不用手工做。
+**文字页和图片页各有一个入口**，区别只是接的东西不一样：
+
+| 入口 | 接什么 | 补的示例 |
+|---|---|---|
+| 文字页：**一键接入工程…** | `OLED_CFont.h`（汉字库） | 两行 `OLED_CFont_ShowString(...)` |
+| 图片页：**一键接入工程…** | 上次「全部存进一个 .h」导出的素材包 | 一行 `Xxx_ShowFrame(0)`，先刷第 0 帧 |
+
+素材包那条**只插一行首帧调用，不把播放循环塞进 `while(1)`**：那要动你已有的循环体，
+得跳过按键扫描和延时节奏，等于替你决定程序结构。插在 `OLED_Init()` 之后一行，
+能立刻看出接线对不对、图是不是这张；真要播动画，把它换成循环即可，预览里会写下怎么换。
+
+流程：
 
 1. 工具自己找工程根（认 `.uvprojx` / `.ewp` / `.cproject` 这些工程文件，不看目录名）
 2. 在工程里找**定义了写命令函数的那个 `.c`**（`OLED.c` 也好 `lcd.c` 也好，靠内容判断），
    再找它旁边的 `.h`
 3. 找**调用了 `OLED_Init()` 的那个 `.c`**（同样不看文件名）
-4. 把三处插入列出来，右边能逐条看插入位置和上下文
+4. 把各处插入列出来，右边能逐条看插入位置和上下文
 
 每一条都可以单独取消勾选。确认无误点「执行」。
 
@@ -527,9 +542,36 @@ main.c：补 2 行示例调用      ← 加在 OLED_Init(); 之后
 
 - 头文件里两个文件的行尾不一样（`OLED.h` 是 CRLF、`main.c` 是 LF 还带 BOM），
   工具按各自的原样写回，不会把整个文件的行尾都改掉
-- `#include` 写成**相对路径**（`../Hardware/OLED_CFont.h`），Keil 里不用另配 Include Path
+- `#include` 的写法**跟着工程走**：`main.c` 里已经用短名包含过同目录的头文件
+  （典型是 `#include "OLED.h"`），说明那个目录在 Include Path 上，字库也写短名
+  `#include "OLED_CFont.h"`，两行看着是一套规则；没有这个依据就写相对路径
+  `../Hardware/OLED_CFont.h`，保证一定编得过
 - 驱动里同时有 `OLED_Init` 和 `OLED_I2C_Init` 时，挑**真的在 main 里被调用**的那个
 - 找不到 `OLED_Init();` 单独成行时**宁可不插**示例，也不猜位置——插错地方会编译不过
+
+### `OLED_Font.h` 和 `OLED_CFont.h` 不是一份文件
+
+名字只差一个 `C`，接进去的时候最容易看混，但它们完全不搭界：
+
+| 文件 | 是什么 | 谁在用 |
+|---|---|---|
+| `OLED_Font.h` | 例程自带的 **ASCII 8×16** 字库 | `OLED_ShowChar` / `OLED_ShowString`（字母、数字） |
+| `OLED_CFont.h` | 本工具生成的**汉字**点阵库 | `OLED_CFont_ShowString`（汉字） |
+
+两个都要有，各管一半：一行字里既有字母数字也有汉字。
+
+`main.c` 里那两行 `#include` 也**不重复**——`.c` 里的 `#include` 只对那个文件自己有效
+（`OLED.c` 里包含过什么，`main.c` 一点都看不到）。`main.c` 要调 `OLED_Init`，
+就必须自己看见它的声明：
+
+```c
+#include "OLED.h"          /* OLED_Init / OLED_ShowString 的声明 */
+#include "OLED_CFont.h"    /* OLED_CFont_ShowString */
+```
+
+顺序还有讲究：`OLED_CFont.h` 默认把 ASCII 交给 `OLED_ShowChar` 显示，
+所以 `OLED.h` 必须写在它前面。工具补 include 时也是加在**最后一个 include 之后**，
+不会插到前面去。
 
 ## 屏控制器：SSD1306 还是 SH1106
 

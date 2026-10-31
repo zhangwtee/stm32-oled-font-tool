@@ -68,6 +68,21 @@ bool detect(const QString &fontHeaderPath,
             Scan *out);
 
 /*
+ * 素材包（动画页导出的那个 .h）的接入。流程和 detect 一样，只是：
+ *   · 幂等判断按实际文件名来，不再写死 OLED_CFont.h
+ *   · 示例是「刷第 0 帧」一行，插在 OLED_Init() 之后，不动 while(1)
+ *
+ * showFunc：要写进示例的显示函数名（listAssetShowFuncs 里挑一个）。
+ *           传空就只补 include，不插示例。
+ */
+bool detectAssets(const QString &assetsHeaderPath,
+                  const QString &showFunc,
+                  Scan *out);
+
+/* 从素材包头里挑出所有 Xxx_ShowFrame 函数名，供界面下拉选 */
+QStringList listAssetShowFuncs(const QString &headerPath);
+
+/*
  * 把某个文件应用完这些 step 之后的样子，返回「改动行 ± 上下文」的文本。
  * 用于写盘前让用户确认。返回值带行号前缀，一眼能看出插在哪。
  */

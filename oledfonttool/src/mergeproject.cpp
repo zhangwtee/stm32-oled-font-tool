@@ -683,6 +683,32 @@ static QString relPath(const QString &fromDir, const QString &toFile)
 	return out.join(QLatin1Char('/'));
 }
 
+/*
+ * 这个目录是不是已经在工程的 Include Path 里？
+ *
+ * 问不到 Keil，但 main.c 自己写着答案：里面有一条不带路径的短名
+ * #include "xxx.h"，而那个 xxx.h 就在目标目录下 —— 那条既然能编过，
+ * 说明这个目录必然在 Include Path 上（不然早就报找不到了）。
+ *
+ * 有这条依据就用短名，和用户自己的写法一致；没有就退回相对路径：
+ * 多三个点，但一定编得过。
+ */
+static bool dirLooksOnIncludePath(const QString &mainText, const QString &dir)
+{
+	static const QRegularExpression re(
+		QStringLiteral("#[ \\t]*include\\s*\"([^\"\\\\/]+)\""));
+	auto it = re.globalMatch(mainText);
+	while (it.hasNext())
+	{
+		const QString name = it.next().captured(1);
+		if (QFileInfo::exists(dir + QLatin1Char('/') + name))
+		{
+			return true;
+		}
+	}
+	return false;
+}
+
 /* 从上往下找「这是一个工程」的硬标记。找不到就返回空。 */
 static QString findRootUpward(const QString &startDir)
 {
@@ -723,63 +749,35 @@ static QString findRootUpward(const QString &startDir)
 	return QString();
 }
 
-bool detect(const QString &fontHeaderPath,
-            const QString &sample1,
-            const QString &sample2,
-            Scan *out)
+/* 从导出好的头文件往上找工程根。认不到工程文件就退回"头文件目录的上一层" */
+static QString projectRootFor(const QString &headerAbs)
 {
-	if (!out)
+	QString root = findRootUpward(QFileInfo(headerAbs).absolutePath());
+	if (!root.isEmpty())
 	{
-		return false;
-	}
-	*out = Scan();
-
-	/* 统一成正斜杠：路径可能来自命令行（反斜杠）、QFileDialog（反斜杠）或
-	 * QSettings（可能是正斜杠）。混着用会让 relativeFilePath 判不出公共前缀。 */
-	/* 一律绝对化：主界面传进来的是绝对路径，但命令行/测试可能传相对路径，
-	 * 不绝对化的话后面算 #include 相对路径会拿绝对对相对，直接算不出来。 */
-	const QString fontAbs =
-		QFileInfo(QDir::cleanPath(QDir::fromNativeSeparators(fontHeaderPath))).absoluteFilePath();
-	out->fontHeader = fontAbs;
-
-	if (fontAbs.isEmpty() || !QFileInfo::exists(fontAbs))
-	{
-		out->error = QStringLiteral("还没有导出字库。先点「导出 OLED_CFont.h」，再来做接入。");
-		return false;
-	}
-	/* 工程根：优先认工程文件（.uvprojx 等），认不到再退回"字库目录的上一层"。
-	 * 后者只是启发式 —— 字库放在 User\ 里时会推错，所以放在后面兜底。 */
-	out->root = findRootUpward(QFileInfo(fontAbs).absolutePath());
-	if (out->root.isEmpty())
-	{
-		out->root = QFileInfo(fontAbs).absolutePath();
-		const QString leaf = QFileInfo(out->root).fileName().toLower();
-		if (leaf == QLatin1String("hardware") || leaf == QLatin1String("bsp")
-		    || leaf == QLatin1String("user") || leaf == QLatin1String("inc")
-		    || leaf == QLatin1String("src"))
-		{
-			out->root = QFileInfo(out->root).absolutePath();
-		}
+		return root;
 	}
 
-	/* ---- 1. 驱动 ---- */
-	Driver drv;
-	if (!findDriver(out->root, &drv))
+	/* 兜底是启发式：Hardware\ 里的头文件，工程根在上一层 */
+	root = QFileInfo(headerAbs).absolutePath();
+	const QString leaf = QFileInfo(root).fileName().toLower();
+	if (leaf == QLatin1String("hardware") || leaf == QLatin1String("bsp")
+	    || leaf == QLatin1String("user") || leaf == QLatin1String("inc")
+	    || leaf == QLatin1String("src"))
 	{
-		out->error = QStringLiteral(
-			"在 %1 下面没找到 OLED 驱动。\n\n"
-			"判断依据是「哪个 .c 里定义了 OLED_WriteCommand（或类似的写命令函数）」，"
-			"不看文件名。如果你确定工程在这儿，可以自己把两行声明加到驱动头文件里：\n\n"
-			"void OLED_WriteCommand(uint8_t Command);\n"
-			"void OLED_WriteData(uint8_t Data);")
-			.arg(QDir::toNativeSeparators(out->root));
-		return false;
+		root = QFileInfo(root).absolutePath();
 	}
-	out->driverC  = drv.cFile;
-	out->driverH  = drv.hFile;
-	out->cmdFunc  = drv.cmdFunc;
-	out->dataFunc = drv.dataFunc;
+	return root;
+}
 
+/*
+ * 驱动头文件里补上「写命令」「写数据」两个声明。
+ *
+ * 它们本来就定义在驱动 .c 里，只是老例程没在 .h 里导出，别的 .c 调不到。
+ * 字库和素材包都得先过这一关，所以单独提出来两边共用。
+ */
+static void addDriverDeclSteps(const Driver &drv, Scan *out)
+{
 	/* ---- 2. 驱动头文件补声明 ---- */
 	if (!drv.hFile.isEmpty())
 	{
@@ -855,6 +853,55 @@ bool detect(const QString &fontHeaderPath,
 		                  .arg(QFileInfo(drv.cFile).fileName(), drv.cmdFunc, drv.dataFunc);
 	}
 
+}
+
+bool detect(const QString &fontHeaderPath,
+            const QString &sample1,
+            const QString &sample2,
+            Scan *out)
+{
+	if (!out)
+	{
+		return false;
+	}
+	*out = Scan();
+
+	/* 统一成正斜杠：路径可能来自命令行（反斜杠）、QFileDialog（反斜杠）或
+	 * QSettings（可能是正斜杠）。混着用会让 relativeFilePath 判不出公共前缀。 */
+	/* 一律绝对化：主界面传进来的是绝对路径，但命令行/测试可能传相对路径，
+	 * 不绝对化的话后面算 #include 相对路径会拿绝对对相对，直接算不出来。 */
+	const QString fontAbs =
+		QFileInfo(QDir::cleanPath(QDir::fromNativeSeparators(fontHeaderPath))).absoluteFilePath();
+	out->fontHeader = fontAbs;
+
+	if (fontAbs.isEmpty() || !QFileInfo::exists(fontAbs))
+	{
+		out->error = QStringLiteral("还没有导出字库。先点「导出 OLED_CFont.h」，再来做接入。");
+		return false;
+	}
+	/* 工程根：优先认工程文件（.uvprojx 等），认不到再退回"字库目录的上一层" */
+	out->root = projectRootFor(fontAbs);
+
+	/* ---- 1. 驱动 ---- */
+	Driver drv;
+	if (!findDriver(out->root, &drv))
+	{
+		out->error = QStringLiteral(
+			"在 %1 下面没找到 OLED 驱动。\n\n"
+			"判断依据是「哪个 .c 里定义了 OLED_WriteCommand（或类似的写命令函数）」，"
+			"不看文件名。如果你确定工程在这儿，可以自己把两行声明加到驱动头文件里：\n\n"
+			"void OLED_WriteCommand(uint8_t Command);\n"
+			"void OLED_WriteData(uint8_t Data);")
+			.arg(QDir::toNativeSeparators(out->root));
+		return false;
+	}
+	out->driverC  = drv.cFile;
+	out->driverH  = drv.hFile;
+	out->cmdFunc  = drv.cmdFunc;
+	out->dataFunc = drv.dataFunc;
+
+	addDriverDeclSteps(drv, out);
+
 	/* ---- 3. main.c 补 include + 示例 ---- */
 	QString initFunc;
 	out->mainC = findMainC(out->root, drv.initFuncs, drv.cFile, &initFunc);
@@ -886,25 +933,57 @@ bool detect(const QString &fontHeaderPath,
 
 			if (!hasInclude)
 			{
-				/* 相对路径，不依赖 Keil 的 Include Path 配没配 */
 				const QString mainDir = QDir::cleanPath(
 					QDir::fromNativeSeparators(QFileInfo(out->mainC).absolutePath()));
-				const QString rel = relPath(mainDir, out->fontHeader);
+				const QString headerDir = QFileInfo(out->fontHeader).absolutePath();
+
+				/* 跟工程里已有的写法保持一致。它要是用短名包含过同目录的头文件
+				 * （典型是 OLED.h），说明这个目录在 Include Path 上，字库也用短名
+				 * —— 否则 main.c 里会并排出现 "OLED.h" 和 "../Hardware/OLED_CFont.h"
+				 * 两套规则，看着就像重复包含了两遍。 */
+				const bool shortOk = dirLooksOnIncludePath(text, headerDir);
+				const QString inc = shortOk ? QFileInfo(out->fontHeader).fileName()
+				                            : relPath(mainDir, out->fontHeader);
 
 				Step s;
 				s.file      = out->mainC;
 				s.afterLine = lastIncludeLine(lines, enc);
-				s.text      = QStringLiteral("#include \"%1\"").arg(rel);
+				s.text      = QStringLiteral("#include \"%1\"").arg(inc);
 				s.title     = QStringLiteral("%1：补 #include").arg(mainName);
-				s.detail    = QStringLiteral("加在最后一个 #include 之后（第 %1 行后）。\n"
-				                             "字库在 %2，main.c 在 %3，所以写成相对路径 %4"
-				                             "—— Keil 里不用另外配 Include Path。")
-				                  .arg(s.afterLine).arg(out->fontHeader, mainDir, rel);
+				s.detail    = shortOk
+					? QStringLiteral("加在最后一个 #include 之后（第 %1 行后）。\n"
+					                 "用短名 %2 —— main.c 里已经有短名包含同目录的头文件，"
+					                 "说明那个目录在 Include Path 上。")
+					                  .arg(s.afterLine)
+					                  .arg(inc)
+					: QStringLiteral("加在最后一个 #include 之后（第 %1 行后）。\n"
+					                 "字库在 %2，main.c 在 %3，所以写成相对路径 %4"
+					                 "—— Keil 里不用另外配 Include Path。")
+					                  .arg(s.afterLine).arg(out->fontHeader, mainDir, inc);
 				out->steps << s;
 			}
 			else
 			{
 				out->notes << QStringLiteral("%1 里已经 include 过 OLED_CFont.h 了。").arg(mainName);
+
+				/* 已经包含过就不再动它（只插入、不修改是这一版的原则）。但要是写成了
+				 * "../Hardware/OLED_CFont.h" 这种相对路径，而 main.c 里同目录的
+				 * OLED.h 用的是短名，那这行其实可以简化成 #include "OLED_CFont.h"。
+				 * 提一句，改不改由用户定。 */
+				const QRegularExpression withSlash(
+					QStringLiteral("#[ \\t]*include\\s*\"[^\"]*[\\\\/][^\"]*OLED_CFont\\.h\""));
+				if (withSlash.match(text).hasMatch()
+				    && dirLooksOnIncludePath(text, QFileInfo(out->fontHeader).absolutePath()))
+				{
+					out->notes << QStringLiteral(
+						"%1 里那行用的是相对路径。既然同目录的其它头文件都写的短名，"
+						"说明 %2 已经在 Include Path 上，写成 #include \"%3\" 也行"
+						"（等价，不改也能编过）。")
+					                  .arg(mainName,
+					                       QDir::toNativeSeparators(
+					                           QFileInfo(out->fontHeader).absolutePath()),
+					                       QFileInfo(out->fontHeader).fileName());
+				}
 			}
 
 			/* 示例调用 */
@@ -1229,6 +1308,201 @@ bool revert(const QStringList &files, QString *err)
 		}
 		QFile::remove(tmp);
 	}
+	return true;
+}
+
+/* ==========================================================================
+ *  素材包接入（动画页）
+ *
+ *  和字库那条路的差别只有两处：
+ *    · 头文件名不是 OLED_CFont.h，幂等判断要按实际文件名来
+ *    · 示例不是打一行字，而是刷某一帧
+ *
+ *  为什么只插一行首帧调用、不把播放循环塞进 while(1)：那要动用户已有的
+ *  循环体，得跳过他的按键扫描、延时节奏，等于替他决定程序结构。插在
+ *  OLED_Init() 之后一行，能立刻看出"接线对不对、图是不是这张"；真要播，
+ *  用户自己把那一行换成循环，工具在 detail 里写清楚怎么换。
+ * ========================================================================== */
+
+QStringList listAssetShowFuncs(const QString &headerPath)
+{
+	QStringList out;
+
+	QFile f(headerPath);
+	if (!f.open(QIODevice::ReadOnly))
+	{
+		return out;
+	}
+	const QByteArray raw = f.readAll();
+	f.close();
+
+	/* 素材包里每份素材一个 static ... void Xxx_ShowFrame(uint8_t i)。
+	 * 只认 _ShowFrame 后缀，不会把 OLED_WriteCommand 这类底层函数一起捞进来。 */
+	const QString text = decodeFrom(raw, detectEnc(raw));
+	static const QRegularExpression re(
+		QStringLiteral("\\bvoid\\s+([A-Za-z_][A-Za-z0-9_]*_ShowFrame)\\s*\\("));
+	auto it = re.globalMatch(text);
+	while (it.hasNext())
+	{
+		const QString name = it.next().captured(1);
+		if (!out.contains(name))
+		{
+			out << name;
+		}
+	}
+	return out;
+}
+
+bool detectAssets(const QString &assetsHeaderPath, const QString &showFunc, Scan *out)
+{
+	if (!out)
+	{
+		return false;
+	}
+	*out = Scan();
+
+	/* 字段名还叫 fontHeader：Scan 里所有"要接入的那个头文件"都走它，
+	 * 改成两个字段会让 apply/previewOf 那些通用逻辑分叉 */
+	const QString abs = QFileInfo(QDir::cleanPath(QDir::fromNativeSeparators(assetsHeaderPath)))
+	                        .absoluteFilePath();
+	out->fontHeader = abs;
+
+	if (abs.isEmpty() || !QFileInfo::exists(abs))
+	{
+		out->error = QStringLiteral(
+			"还没有导出素材包。先在图片页点「全部存进一个 .h…」，再来做接入。");
+		return false;
+	}
+
+	out->root = projectRootFor(abs);
+
+	Driver drv;
+	if (!findDriver(out->root, &drv))
+	{
+		out->error = QStringLiteral(
+			"在 %1 下面没找到 OLED 驱动。\n\n"
+			"素材包的显示函数要调「写命令」「写数据」两个函数，找不到就没法判断"
+			"该往哪个头文件补声明。你可以自己加：\n\n"
+			"    #include \"%2\"")
+			.arg(QDir::toNativeSeparators(out->root), QFileInfo(abs).fileName());
+		return false;
+	}
+	out->driverC  = drv.cFile;
+	out->driverH  = drv.hFile;
+	out->cmdFunc  = drv.cmdFunc;
+	out->dataFunc = drv.dataFunc;
+
+	addDriverDeclSteps(drv, out);
+
+	QString initFunc;
+	out->mainC    = findMainC(out->root, drv.initFuncs, drv.cFile, &initFunc);
+	out->initFunc = initFunc;
+
+	const QString headerName = QFileInfo(abs).fileName();
+	const QString initName =
+		initFunc.isEmpty() ? QStringLiteral("OLED_Init") : initFunc;
+
+	if (out->mainC.isEmpty())
+	{
+		out->notes << QStringLiteral(
+			"没找到调用 %1() 的源文件。main.c 里这两行需要你自己加：\n"
+			"    #include \"%2\"\n    %3(0);")
+		                  .arg(initName,
+		                       headerName,
+		                       showFunc.isEmpty() ? QStringLiteral("Xxx_ShowFrame") : showFunc);
+		return !out->steps.isEmpty();
+	}
+
+	QFile f(out->mainC);
+	if (!f.open(QIODevice::ReadOnly))
+	{
+		out->error = QStringLiteral("打不开 %1：%2")
+		                 .arg(QDir::toNativeSeparators(out->mainC), f.errorString());
+		return false;
+	}
+	const QByteArray raw = f.readAll();
+	f.close();
+
+	const Enc enc   = detectEnc(raw);
+	const QString text = decodeFrom(raw, enc);
+	QByteArray eol;
+	const QList<QByteArray> lines = splitLines(raw, &eol);
+	const QString mainName = QFileInfo(out->mainC).fileName();
+
+	/* ---- include ---- */
+	const bool hasInclude = QRegularExpression(
+		QStringLiteral("#[ \\t]*include\\s*\"[^\"]*%1\"")
+			.arg(QRegularExpression::escape(headerName)))
+		.match(text).hasMatch();
+
+	if (!hasInclude)
+	{
+		const QString mainDir = QDir::cleanPath(
+			QDir::fromNativeSeparators(QFileInfo(out->mainC).absolutePath()));
+		const QString headerDir = QFileInfo(abs).absolutePath();
+
+		/* 和字库那条路同一套判断：工程里已经在用短名，就跟着用短名 */
+		const bool shortOk = dirLooksOnIncludePath(text, headerDir);
+		const QString inc = shortOk ? headerName : relPath(mainDir, abs);
+
+		Step s;
+		s.file      = out->mainC;
+		s.afterLine = lastIncludeLine(lines, enc);
+		s.text      = QStringLiteral("#include \"%1\"").arg(inc);
+		s.title     = QStringLiteral("%1：补 #include").arg(mainName);
+		s.detail    = shortOk
+			? QStringLiteral("加在最后一个 #include 之后（第 %1 行后）。\n"
+			                 "用短名 %2 —— main.c 里已经有短名包含同目录的头文件，"
+			                 "说明那个目录在 Include Path 上。")
+			                  .arg(s.afterLine).arg(inc)
+			: QStringLiteral("加在最后一个 #include 之后（第 %1 行后）。\n"
+			                 "素材包在 %2，main.c 在 %3，所以写成相对路径 %4"
+			                 "—— Keil 里不用另外配 Include Path。")
+			                  .arg(s.afterLine).arg(abs, mainDir, inc);
+		out->steps << s;
+	}
+	else
+	{
+		out->notes << QStringLiteral("%1 里已经 include 过 %2 了。").arg(mainName, headerName);
+	}
+
+	/* ---- 示例：刷第 0 帧 ---- */
+	if (!showFunc.isEmpty())
+	{
+		const bool hasCall = QRegularExpression(
+			QStringLiteral("\\b%1\\s*\\(").arg(QRegularExpression::escape(showFunc)))
+			.match(text).hasMatch();
+
+		const int initLn = initCallLine(lines, enc, initFunc);
+
+		if (!hasCall && initLn > 0)
+		{
+			Step s;
+			s.file      = out->mainC;
+			s.afterLine = initLn;
+			s.text = QStringLiteral(
+				"\t%1(0);   /* 先刷第 0 帧：图不对就是取模或接线的问题 */")
+				.arg(showFunc);
+			s.title  = QStringLiteral("%1：补 1 行示例").arg(mainName);
+			s.detail = QStringLiteral("加在 %1(); 之后（第 %2 行后）。\n"
+			                          "只刷一帧，用来确认接线和图都对。\n"
+			                          "要播动画，把这一行换成在 while(1) 里按节奏调 "
+			                          "%3(i)（i 从 0 到帧数-1）。")
+			                   .arg(initName).arg(initLn).arg(showFunc);
+			out->steps << s;
+		}
+		else if (hasCall)
+		{
+			out->notes << QStringLiteral("%1 里已经在调 %2 了。").arg(mainName, showFunc);
+		}
+		else
+		{
+			out->notes << QStringLiteral(
+				"没找到 %1(); 单独成句的那一行，示例需要你自己加到 main() 里。")
+			                  .arg(initName);
+		}
+	}
+
 	return true;
 }
 

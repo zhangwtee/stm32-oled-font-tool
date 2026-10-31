@@ -118,6 +118,16 @@ int main(int argc, char **argv)
 
 		writeFile(QDir(outDir).absoluteFilePath(QStringLiteral("OLED_CFont32.h")), h32);
 
+		/* 头文件自己 include <stdint.h>：不写的话它用 uint8_t 全靠调用方
+		 * 把芯片头放在前面，include 顺序一换就报 unknown type name 'uint8_t'。
+		 * 素材包头 oled_assets.h 早就有这一行，字库这份以前漏了。 */
+		check("字库头自带 #include <stdint.h>",
+		      a.contains(QStringLiteral("#include <stdint.h>")), QString());
+		check("stdint 在数组定义之前",
+		      a.indexOf(QStringLiteral("#include <stdint.h>"))
+		          < a.indexOf(QStringLiteral("const uint8_t ")),
+		      QString::number(a.indexOf(QStringLiteral("#include <stdint.h>"))));
+
 		/* 单片机端改成了二分查表，前提是码表按 UTF-8 升序。
 		 * 顺序一旦坏了，表现是"某些字突然显示不出来"，编译链接都不报错，
 		 * 所以这里直接从生成的头文件里把每行的前 3 字节抠出来验一遍。 */

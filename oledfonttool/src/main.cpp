@@ -727,8 +727,11 @@ private:
 
 	/* ---- 一键接入工程 ---- */
 	/* 把「驱动头文件补声明」「main.c 补 include 和示例调用」直接做掉。
-	 * 只插入不改动，写盘前给预览，每个文件留 .oledbak 可撤销。 */
-	void mergeIntoProject();
+	 * 只插入不改动，写盘前给预览，每个文件留 .oledbak 可撤销。
+	 *
+	 * assets = false 接字库（文字页），true 接素材包（图片/动画页）。
+	 * 两条路只差「接哪个头文件」和「示例写什么」，其余完全共用。 */
+	void mergeIntoProject(bool assets = false);
 
 	/* ---- 屏控制器（决定列偏移） ---- */
 	/* 从工程里的驱动源码读出这屏是 SSD1306 还是 SH1106。
@@ -767,6 +770,9 @@ private:
 	QLabel *m_encStatus;            /* 源码编码检查结果 */
 	QCheckBox *m_askEveryTime;      /* 勾上则每次导出都弹对话框选位置 */
 	QString m_headerPath;
+	/* 上次「全部存进一个 .h」写到哪儿。图片页的一键接入认这个路径，
+	 * 省得再让用户选一次。空了就退回设置里存的那份。 */
+	QString m_assetsHeaderPath;
 
 	/* 屏控制器探测结果。offset 0 = SSD1306，2 = SH1106（132 列，可见区从第 2 列起） */
 	QComboBox          *m_screenBox;
@@ -1409,6 +1415,15 @@ QWidget *MainWindow::buildImagePage()
 		"（不合成一个动画）。每份点阵上方会注明导入时的文件名。"));
 	sideLayout->addWidget(exportPackBtn);
 
+	/* 和文字页那个「一键接入工程」是同一套（补声明 / 补 include / 补示例 / 可撤销），
+	 * 只是接的是素材包头，示例换成「刷第 0 帧」 */
+	QPushButton *mergeAssetBtn = new QPushButton(QStringLiteral("一键接入工程…"), side);
+	mergeAssetBtn->setToolTip(QStringLiteral(
+		"把上次导出的素材包头接进工程：驱动头补函数声明、main.c 补 #include，\n"
+		"再补一行「刷第 0 帧」的调用（插在 OLED_Init 之后，不动 while 循环）。\n"
+		"只插入不改已有行，写盘前能逐条预览，每个文件留 .oledbak 可撤销。"));
+	sideLayout->addWidget(mergeAssetBtn);
+
 	/* 右侧预览 */
 	m_imgPreview = new ImagePreview(this);
 	QScrollArea *scroll = new QScrollArea(this);
@@ -1432,6 +1447,7 @@ QWidget *MainWindow::buildImagePage()
 	connect(exportBtn, &QPushButton::clicked, this, &MainWindow::exportAnimHeader);
 	connect(exportAllBtn, &QPushButton::clicked, this, &MainWindow::exportAllAssets);
 	connect(exportPackBtn, &QPushButton::clicked, this, &MainWindow::exportAssetsToSingleFile);
+	connect(mergeAssetBtn, &QPushButton::clicked, this, [this] { mergeIntoProject(true); });
 	connect(m_imgPlayBtn, &QPushButton::clicked, this, &MainWindow::togglePlayback);
 	connect(removeBtn, &QPushButton::clicked, this, &MainWindow::removeCurrentAsset);
 	connect(clearBtn, &QPushButton::clicked, this, [this] {
@@ -1483,6 +1499,7 @@ QWidget *MainWindow::buildImagePage()
 	syncImageSizeToScreen();
 
 	updateImageInfo();
+
 	return splitter;
 }
 
@@ -2373,6 +2390,10 @@ void MainWindow::exportAssetsToSingleFile()
 		return;
 	}
 
+	/* 记下来：图片页的「一键接入工程」直接认这个路径，不用再选一次 */
+	m_assetsHeaderPath = path;
+	QSettings().setValue(QStringLiteral("export/assetPack"), path);
+
 	/* 把每份的宏前缀列出来：用户接下来要去 .c 里照着这个名字调函数，
 	 * 让他不用回头翻头文件。 */
 	QStringList lines;
@@ -2395,7 +2416,9 @@ void MainWindow::exportAssetsToSingleFile()
 		QStringLiteral("已写入：\n%1\n\n%2 份素材，共 %3 字节（%4 KB）\n\n"
 		               "每份各自独立（没有合成动画），点阵上方注明了导入时的文件名：\n%5\n\n"
 		               "把【适配区】三个宏指向你的写命令、写数据、延时函数，"
-		               "再调对应的 Xxx_ShowFrame(i) 就行。")
+		               "再调对应的 Xxx_ShowFrame(i) 就行。\n\n"
+		               "驱动头声明和 main.c 的 #include 可以让工具代做："
+		               "点左边的「一键接入工程…」。")
 		.arg(path)
 		.arg(list.size())
 		.arg(total)
@@ -2601,10 +2624,11 @@ void MainWindow::showSelfTest()
  *      2) 写盘前把每一处插入的文件、行号、内容全摆出来
  *      3) 每个文件留 .oledbak，一键撤销
  * ========================================================================== */
-void MainWindow::mergeIntoProject()
+void MainWindow::mergeIntoProject(bool assets)
 {
 	QDialog dlg(this);
-	dlg.setWindowTitle(QStringLiteral("一键接入工程"));
+	dlg.setWindowTitle(assets ? QStringLiteral("一键接入动画")
+	                          : QStringLiteral("一键接入工程"));
 	dlg.resize(940, 640);
 
 	QVBoxLayout *root = new QVBoxLayout(&dlg);
@@ -2616,14 +2640,41 @@ void MainWindow::mergeIntoProject()
 	head->setTextInteractionFlags(Qt::TextSelectableByMouse);
 	root->addWidget(head);
 
-	/* ---- 示例文字 ---- */
+	/* ---- 示例：字库写文字，素材包挑一份来刷帧 ---- */
 	QHBoxLayout *txtRow = new QHBoxLayout();
-	txtRow->addWidget(new QLabel(QStringLiteral("示例第 1 行："), &dlg));
-	QLineEdit *line1 = new QLineEdit(QStringLiteral("温度正常"), &dlg);
-	txtRow->addWidget(line1, 1);
-	txtRow->addWidget(new QLabel(QStringLiteral("第 2 行："), &dlg));
-	QLineEdit *line2 = new QLineEdit(QStringLiteral("T=25C 湿度60%"), &dlg);
-	txtRow->addWidget(line2, 1);
+	QLineEdit *line1 = nullptr;
+	QLineEdit *line2 = nullptr;
+	QComboBox *showBox = nullptr;
+
+	/* 素材包头：本次会话导出过就用它，否则用上次记住的路径 */
+	QString packPath = m_assetsHeaderPath;
+	if (packPath.isEmpty() || !QFileInfo::exists(packPath))
+	{
+		packPath = QSettings().value(QStringLiteral("export/assetPack")).toString();
+	}
+
+	if (assets)
+	{
+		txtRow->addWidget(new QLabel(QStringLiteral("示例用哪一份："), &dlg));
+		showBox = new QComboBox(&dlg);
+		showBox->addItems(MergeProject::listAssetShowFuncs(packPath));
+		showBox->setToolTip(QStringLiteral(
+			"从素材包头里读出来的显示函数。选中的这个会以「刷第 0 帧」的形式"
+			"插到 main() 里。"));
+		txtRow->addWidget(showBox, 1);
+		QLabel *note = new QLabel(QStringLiteral("插在 OLED_Init 之后刷第 0 帧"), &dlg);
+		note->setObjectName(QStringLiteral("Hint"));
+		txtRow->addWidget(note);
+	}
+	else
+	{
+		txtRow->addWidget(new QLabel(QStringLiteral("示例第 1 行："), &dlg));
+		line1 = new QLineEdit(QStringLiteral("温度正常"), &dlg);
+		txtRow->addWidget(line1, 1);
+		txtRow->addWidget(new QLabel(QStringLiteral("第 2 行："), &dlg));
+		line2 = new QLineEdit(QStringLiteral("T=25C 湿度60%"), &dlg);
+		txtRow->addWidget(line2, 1);
+	}
 	root->addLayout(txtRow);
 
 	/* ---- 左边勾选清单，右边预览 ---- */
@@ -2686,17 +2737,38 @@ void MainWindow::mergeIntoProject()
 		}
 
 		scan = MergeProject::Scan();
-		if (m_headerPath.isEmpty())
+		bool ok = false;
+		if (assets)
 		{
-			head->setText(QStringLiteral("还没有导出字库。先点「导出 OLED_CFont.h」，再来做接入。"));
-			stepList->clear();
-			prev->clear();
-			doBtn->setEnabled(false);
-			return;
+			if (packPath.isEmpty() || !QFileInfo::exists(packPath))
+			{
+				head->setText(QStringLiteral(
+					"还没有导出素材包。先在图片页点「全部存进一个 .h…」，再来做接入。"));
+				stepList->clear();
+				prev->clear();
+				doBtn->setEnabled(false);
+				return;
+			}
+			ok = MergeProject::detectAssets(packPath,
+			                                showBox ? showBox->currentText() : QString(),
+			                                &scan);
+		}
+		else
+		{
+			if (m_headerPath.isEmpty())
+			{
+				head->setText(QStringLiteral(
+					"还没有导出字库。先点「导出 OLED_CFont.h」，再来做接入。"));
+				stepList->clear();
+				prev->clear();
+				doBtn->setEnabled(false);
+				return;
+			}
+			ok = MergeProject::detect(m_headerPath, line1->text().trimmed(),
+			                          line2->text().trimmed(), &scan);
 		}
 
-		if (!MergeProject::detect(m_headerPath, line1->text().trimmed(),
-		                          line2->text().trimmed(), &scan))
+		if (!ok)
 		{
 			head->setText(QStringLiteral("没找到能自动改的地方：\n\n") + scan.error);
 			stepList->clear();
@@ -2706,6 +2778,10 @@ void MainWindow::mergeIntoProject()
 		}
 
 		QStringList h;
+		if (assets)
+		{
+			h << QStringLiteral("素材包：%1").arg(QDir::toNativeSeparators(packPath));
+		}
 		h << QStringLiteral("工程：%1").arg(QDir::toNativeSeparators(scan.root));
 		if (!scan.driverC.isEmpty())
 		{
@@ -2751,8 +2827,16 @@ void MainWindow::mergeIntoProject()
 
 	/* 必须先连好再 rescan：rescan 里有 setCurrentRow(0)，
 	 * 信号没连上的话第一次打开预览区是空的。 */
-	connect(line1, &QLineEdit::textChanged, &dlg, [&](const QString &) { rescan(); });
-	connect(line2, &QLineEdit::textChanged, &dlg, [&](const QString &) { rescan(); });
+	if (assets)
+	{
+		connect(showBox, &QComboBox::currentTextChanged, &dlg,
+		        [&](const QString &) { rescan(); });
+	}
+	else
+	{
+		connect(line1, &QLineEdit::textChanged, &dlg, [&](const QString &) { rescan(); });
+		connect(line2, &QLineEdit::textChanged, &dlg, [&](const QString &) { rescan(); });
+	}
 	connect(stepList, &QListWidget::currentRowChanged, &dlg, [&](int row) { showStep(row); });
 
 	rescan();

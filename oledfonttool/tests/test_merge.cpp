@@ -321,6 +321,179 @@ int main(int argc, char **argv)
 		      MergeProject::judgeSource(QByteArray(), false) == SrcIssue::None, QString());
 	}
 
+	std::printf("[一键接入：include 写法跟工程一致]\n");
+	{
+		/* 现场的困惑：「main.c 里写了 #include "oled.h"，工具又塞进来一行
+		 * #include "../Hardware/OLED_CFont.h"，看着像重复了两遍。」
+		 *
+		 * 判据就在 main.c 自己身上：它有一条不带路径的短名 include，而那个
+		 * 头文件就在字库同目录 —— 这条能编过，说明该目录在 Include Path 上，
+		 * 字库也用短名就对了。没有这条依据时仍写相对路径（一定编得过）。
+		 */
+		writeFile(mainC, mainBytes);        /* mainBytes 里有 #include "oled.h" */
+
+		MergeProject::Scan scan;
+		const bool ok = MergeProject::detect(fontH, QStringLiteral("A"),
+		                                     QStringLiteral("B"), &scan);
+		check("detect 成功", ok, scan.error);
+
+		QString inc;
+		for (const MergeProject::Step &s : scan.steps)
+		{
+			if (s.title.contains(QStringLiteral("补 #include")))
+			{
+				inc = s.text;
+			}
+		}
+		check("同目录头文件已用短名 -> 字库也用短名",
+		      inc == QStringLiteral("#include \"OLED_CFont.h\""), inc);
+	}
+
+	std::printf("[一键接入：没有短名依据时退回相对路径]\n");
+	{
+		/* 另造一个工程：main.c 里全是带路径的 include，说明 Include Path 没配
+		 * 或者不包含 Hardware —— 这时候必须写相对路径，短名会直接找不到文件。 */
+		const QString root2 = base + QStringLiteral("/mergecase2");
+		QDir().mkpath(root2 + QStringLiteral("/Hardware"));
+		QDir().mkpath(root2 + QStringLiteral("/User"));
+
+		const QString c2 = root2 + QStringLiteral("/Hardware/oled.c");
+		const QString h2 = root2 + QStringLiteral("/Hardware/oled.h");
+		const QString m2 = root2 + QStringLiteral("/User/main.c");
+		const QString f2 = root2 + QStringLiteral("/Hardware/OLED_CFont.h");
+
+		writeFile(c2,
+		          "#include \"../Hardware/oled.h\"\n"
+		          "void OLED_WriteCommand(uint8_t cmd)\n"
+		          "{\n"
+		          "    (void)cmd;\n"
+		          "}\n"
+		          "void OLED_WriteData(uint8_t d)\n"
+		          "{\n"
+		          "    (void)d;\n"
+		          "}\n"
+		          "void OLED_Init(void)\n"
+		          "{\n"
+		          "}\n");
+		writeFile(h2, "#ifndef __OLED_H\n#define __OLED_H\nvoid OLED_Init(void);\n#endif\n");
+		writeFile(m2,
+		          "#include \"../Hardware/oled.h\"\n"
+		          "\n"
+		          "int main(void)\n"
+		          "{\n"
+		          "    OLED_Init();\n"
+		          "    while (1) { }\n"
+		          "}\n");
+		writeFile(f2, "#ifndef __OLED_CFONT_H\n#define __OLED_CFONT_H\n#endif\n");
+
+		MergeProject::Scan scan;
+		const bool ok = MergeProject::detect(f2, QString(), QString(), &scan);
+		check("detect 成功（第二个工程）", ok, scan.error);
+
+		QString inc;
+		for (const MergeProject::Step &s : scan.steps)
+		{
+			if (s.title.contains(QStringLiteral("补 #include")))
+			{
+				inc = s.text;
+			}
+		}
+		check("没有短名依据 -> 写相对路径",
+		      inc == QStringLiteral("#include \"../Hardware/OLED_CFont.h\""), inc);
+	}
+
+	std::printf("[素材包接入]\n");
+	{
+		const QString pack = root + QStringLiteral("/Hardware/oled_assets.h");
+		writeFile(pack,
+		          "#ifndef __OLED_ASSETS_H\n"
+		          "#define __OLED_ASSETS_H\n"
+		          "#include <stdint.h>\n"
+		          "static void Logo_ShowFrame(uint8_t i) { (void)i; }\n"
+		          "static void Miao_ShowFrame(uint8_t i) { (void)i; }\n"
+		          "#endif\n");
+
+		const QStringList funcs = MergeProject::listAssetShowFuncs(pack);
+		check("列出素材包里的显示函数", funcs.size() == 2,
+		      funcs.join(QStringLiteral(", ")));
+		check("认出两个 _ShowFrame（不会把写命令函数也算进来）",
+		      funcs.contains(QStringLiteral("Logo_ShowFrame"))
+		          && funcs.contains(QStringLiteral("Miao_ShowFrame")),
+		      funcs.join(QStringLiteral(", ")));
+
+		writeFile(mainC, mainBytes);        /* 回到干净现场 */
+		const int initLn = 6;               /* mainBytes：1-2 include，3 空，4 main，5 {，6 Init */
+
+		MergeProject::Scan scan;
+		const bool ok = MergeProject::detectAssets(pack, QStringLiteral("Miao_ShowFrame"),
+		                                           &scan);
+		check("detectAssets 成功", ok, scan.error);
+
+		QString inc;
+		int     showLine = -1;
+		QString showText;
+		for (const MergeProject::Step &s : scan.steps)
+		{
+			if (s.title.contains(QStringLiteral("补 #include")))
+			{
+				inc = s.text;
+			}
+			else if (s.title.contains(QStringLiteral("示例")))
+			{
+				showLine = s.afterLine;
+				showText = s.text;
+			}
+		}
+		check("素材包也用短名（和 oled.h 一致）",
+		      inc == QStringLiteral("#include \"oled_assets.h\""), inc);
+		check("示例插在 OLED_Init() 之后", showLine == initLn, QString::number(showLine));
+		check("示例是刷第 0 帧",
+		      showText.contains(QStringLiteral("Miao_ShowFrame(0)")), showText);
+
+		/* 幂等：已经接过一次（include 和调用都在），就不该再插第二遍 */
+		QByteArray done("\xEF\xBB\xBF");
+		done.append("#include \"stm32f10x.h\"\n"
+		            "#include \"oled.h\"\n"
+		            "#include \"oled_assets.h\"\n"
+		            "\n"
+		            "int main(void)\n"
+		            "{\n"
+		            "    OLED_Init();\n"
+		            "    Miao_ShowFrame(0);\n"
+		            "    while (1) { }\n"
+		            "}\n");
+		writeFile(mainC, done);
+
+		MergeProject::Scan scan2;
+		const bool ok2 = MergeProject::detectAssets(pack, QStringLiteral("Miao_ShowFrame"),
+		                                            &scan2);
+		check("已接过一次时仍能检测成功", ok2, scan2.error);
+
+		bool hasInc = false;
+		bool hasShow = false;
+		for (const MergeProject::Step &s : scan2.steps)
+		{
+			if (s.title.contains(QStringLiteral("补 #include")))
+			{
+				hasInc = true;
+			}
+			if (s.title.contains(QStringLiteral("示例")))
+			{
+				hasShow = true;
+			}
+		}
+		check("已接过 -> 不再补 include", !hasInc, QString());
+		check("已接过 -> 不再补示例", !hasShow, QString());
+
+		/* 素材包不存在：要说清楚下一步做什么，而不是抛个空错误 */
+		MergeProject::Scan scan3;
+		const bool ok3 = MergeProject::detectAssets(root + QStringLiteral("/没有这个.h"),
+		                                            QString(), &scan3);
+		check("素材包不存在 -> 返回失败", !ok3, QString());
+		check("失败时给了人话提示",
+		      scan3.error.contains(QStringLiteral("全部存进一个")), scan3.error);
+	}
+
 	std::printf("\n%d passed, %d failed\n", g_pass, g_fail);
 	return g_fail == 0 ? 0 : 1;
 }
