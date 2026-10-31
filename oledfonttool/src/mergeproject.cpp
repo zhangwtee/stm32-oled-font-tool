@@ -105,6 +105,31 @@ static bool hasNonAsciiByte(const QByteArray &b)
 	return false;
 }
 
+SrcIssue judgeSource(const QByteArray &raw, bool hasNonAsciiLiteral)
+{
+	/* 没有中文字符串的文件不用管：注释里的中文不参与查表，armcc 也不在意
+	 * （注释里的字节被吃掉不会改变任何东西，最多换个行的位置） */
+	if (!hasNonAsciiLiteral)
+	{
+		return SrcIssue::None;
+	}
+
+	if (raw.startsWith("\xEF\xBB\xBF"))
+	{
+		return SrcIssue::None;      /* 有 BOM：armcc 按 UTF-8 读，查表也对得上 */
+	}
+
+	/* 不是合法 UTF-8，那就是 GBK/ANSI：armcc 读得懂（它本来就按 GBK 读），
+	 * 编译能过，但字符串字节和字库的键（UTF-8）对不上，屏幕全空 */
+	if (!isValidUtf8(raw))
+	{
+		return SrcIssue::NotUtf8;
+	}
+
+	/* 合法 UTF-8 却没 BOM：查表对得上，armcc 这一关过不去 */
+	return SrcIssue::NoBom;
+}
+
 /* QString -> 目标编码字节。GBK 走 Win32 代码页 936，不额外依赖 Qt 模块 */
 static QByteArray encodeTo(const QString &s, Enc e)
 {

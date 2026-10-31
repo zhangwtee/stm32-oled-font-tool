@@ -289,6 +289,38 @@ int main(int argc, char **argv)
 		      a2.startsWith("#include \"OLED_CFont.h\""), QString::fromUtf8(a2.left(40)));
 	}
 
+	std::printf("[源码编码归类]\n");
+	{
+		/* 两类失败后果完全不同，分错了界面就会给错建议：
+		 *   存成 GBK        -> 编译能过、查表对不上、屏幕全空
+		 *   UTF-8 但没 BOM  -> 查表对得上、armcc 报 #8 编不过
+		 * 这一组把边界钉死。以前这段逻辑就地写在界面函数里，没有测试，
+		 * 漏了"缺 BOM"那一支，结果就是"明明编不过，界面还打勾"。 */
+		const QByteArray utf8NoBom("#include \"x.h\"\nvoid f(void) { g(\"\xE5\xBC\xA0\"); }\n");
+		QByteArray utf8Bom("\xEF\xBB\xBF");
+		utf8Bom.append(utf8NoBom);
+		const QByteArray gbk("#include \"x.h\"\nvoid f(void) { g(\"\xD5\xC5\"); }\n");
+		const QByteArray ascii("#include \"x.h\"\nvoid f(void) { g(\"abc\"); }\n");
+		const QByteArray commentOnly("/* \xE5\xBC\xA0\xE6\xB8\xA9 */\nvoid f(void) { }\n");
+
+		using MergeProject::SrcIssue;
+
+		check("UTF-8 无 BOM + 中文字面量 -> NoBom",
+		      MergeProject::judgeSource(utf8NoBom, true) == SrcIssue::NoBom, QString());
+		check("UTF-8 带 BOM -> 没问题",
+		      MergeProject::judgeSource(utf8Bom, true) == SrcIssue::None, QString());
+		check("GBK -> NotUtf8（是查表失败，不是缺 BOM）",
+		      MergeProject::judgeSource(gbk, true) == SrcIssue::NotUtf8, QString());
+		check("纯 ASCII 文件 -> 没问题",
+		      MergeProject::judgeSource(ascii, false) == SrcIssue::None, QString());
+		check("中文只在注释里 -> 不算问题",
+		      MergeProject::judgeSource(commentOnly, false) == SrcIssue::None, QString());
+		check("GBK 文件但没中文字面量 -> 不算问题",
+		      MergeProject::judgeSource(gbk, false) == SrcIssue::None, QString());
+		check("空文件 -> 没问题",
+		      MergeProject::judgeSource(QByteArray(), false) == SrcIssue::None, QString());
+	}
+
 	std::printf("\n%d passed, %d failed\n", g_pass, g_fail);
 	return g_fail == 0 ? 0 : 1;
 }

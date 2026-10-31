@@ -507,7 +507,8 @@ static void collectSourceFiles(const QDir &dir, QStringList &out, int maxDepth, 
 /* 检测一个源文件的编码。
  * 判据：UTF-8 的多字节序列有严格规则，GBK 的中文字节几乎不可能碰巧是合法 UTF-8，
  *       所以"能否整体按 UTF-8 解码"就是很可靠的判据。 */
-static QString detectSourceEncoding(const QString &path, QString *outText)
+static QString detectSourceEncoding(const QString &path, QString *outText,
+                                   QByteArray *outRaw = nullptr)
 {
 	QFile f(path);
 	if (!f.open(QIODevice::ReadOnly))
@@ -516,6 +517,11 @@ static QString detectSourceEncoding(const QString &path, QString *outText)
 	}
 	const QByteArray raw = f.readAll();
 	f.close();
+
+	if (outRaw)
+	{
+		*outRaw = raw;          /* 给 judgeSource 判"缺不缺 BOM"用 */
+	}
 
 	QString text;
 	QString enc;
@@ -3045,7 +3051,8 @@ void MainWindow::checkSourceEncoding(bool popupOnProblem)
 	{
 			const QString name = QFileInfo(path).fileName();
 			QString text;
-			const QString enc = detectSourceEncoding(path, &text);
+			QByteArray raw;
+			const QString enc = detectSourceEncoding(path, &text, &raw);
 			if (enc.isEmpty())
 			{
 				log << QStringLiteral("    %1: 打不开").arg(name);
@@ -3079,14 +3086,19 @@ void MainWindow::checkSourceEncoding(bool popupOnProblem)
 
 			checked << name;
 			details << QStringLiteral("%1  %2").arg(name, enc);
-			if (!enc.startsWith(QLatin1String("UTF-8")))
+
+			/* 归类交给 judgeSource 统一判（有测试兜着）。以前这里是就地用
+			 * enc 字符串拼条件，少写一个分支就是"明明编不过，界面还打勾"。 */
+			switch (MergeProject::judgeSource(raw, hasChineseLiteral))
 			{
+			case MergeProject::SrcIssue::NotUtf8:
 				mismatch << QStringLiteral("%1（%2）示例：\"%3\"").arg(name, enc, sample);
-			}
-			else if (!enc.endsWith(QLatin1String("BOM")))
-			{
-				/* UTF-8 但没 BOM：查表对得上，可 armcc 解析这一关就过不去 */
+				break;
+			case MergeProject::SrcIssue::NoBom:
 				noBom << name;
+				break;
+			case MergeProject::SrcIssue::None:
+				break;
 			}
 	}
 

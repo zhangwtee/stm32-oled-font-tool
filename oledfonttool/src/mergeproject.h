@@ -85,6 +85,24 @@ QStringList revertable(const QStringList &files);
 /* 读文件、按内容判断编码（返回可读文本，供界面预览用） */
 QString readAsText(const QString &path);
 
+/*
+ * 源文件的「能不能编译过去」这一关，三选一。
+ *
+ * 和 readAsText 那种"能不能按 UTF-8 解码"不是一回事：文件是合法 UTF-8，
+ * 但少了 BOM，armcc（AC5）照样按系统代码页当双字节解析，中文串会把后面的
+ * 引号吞掉，报 #8: missing closing quote。查表能对上、编译却过不去。
+ *
+ * hasNonAsciiLiteral 由调用方扫出来传进来 —— 中文注释不影响查表，也不算问题。
+ */
+enum class SrcIssue
+{
+	None,       /* 没问题，或者压根没有中文字符串字面量 */
+	NotUtf8,    /* 按 GBK/ANSI 存的：编译能过，但查表对不上，屏幕全空 */
+	NoBom       /* UTF-8 但没 BOM：查表对得上，armcc 直接报语法错 */
+};
+
+SrcIssue judgeSource(const QByteArray &raw, bool hasNonAsciiLiteral);
+
 }   // namespace MergeProject
 
 #endif   // MERGEPROJECT_H
