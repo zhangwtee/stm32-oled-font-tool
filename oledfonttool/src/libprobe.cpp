@@ -11,6 +11,7 @@
 #include <QFile>
 #include <QFileInfo>
 #include <QRegularExpression>
+#include <QVector>
 
 namespace
 {
@@ -138,6 +139,109 @@ void note(Hit *h, const QString &name, const QString &file, int line, const QStr
 	h->what  = what;
 }
 
+/* 一个候选函数。同一个名字可能在 .h 里声明、在 .c 里定义，记两条 ——
+ * 挑的时候要看它跟字符显示函数是不是同一套驱动，只留一条就把判据丢了。 */
+struct Cand
+{
+	QString name;
+	QString file;       /* 文件名，给用户看 */
+	QString path;       /* 绝对路径，判断是不是同一个文件 */
+	int     line = 0;
+};
+
+/* 写命令 / 写数据 / 字符显示都可能不止一套（工程里同时挂 LCD 和 OLED） */
+struct Bag
+{
+	QVector<Cand> cmd;      /* XxxWriteCommand(c) */
+	QVector<Cand> data;     /* XxxWriteData(d) */
+	QVector<Cand> byte;     /* XxxWR_Byte(d, cmd) */
+	QVector<Cand> show;     /* XxxShowChar(line, col, ch) */
+};
+
+void addCand(QVector<Cand> *v, const QString &name, const QString &file,
+             const QString &path, int line)
+{
+	for (const Cand &c : *v)
+	{
+		if (c.name == name && c.path == path)
+		{
+			return;         /* 同文件同名只记一条 */
+		}
+	}
+	Cand c;
+	c.name = name;
+	c.file = file;
+	c.path = path;
+	c.line = line;
+	v->append(c);
+}
+
+/* 两个名字的公共前缀长度（不分大小写）。
+ * OLED_WriteCommand 和 OLED_ShowChar 共 5 个字符，跟 LCD_WriteCommand 一个都不共。 */
+int commonPrefixLen(const QString &a, const QString &b)
+{
+	int n = 0;
+	while (n < a.size() && n < b.size()
+	       && a.at(n).toLower() == b.at(n).toLower())
+	{
+		++n;
+	}
+	return n;
+}
+
+/*
+ * 「这套函数是不是给 OLED 用的」。
+ *
+ * 课设工程里同时挂 LCD 和 OLED 两套驱动不算少见，两套都有 XxxWriteCommand
+ * 和 XxxShowChar。光按目录名顺序取第一个，LCD.c 排在 OLED.c 前面，就把
+ * LCD_WriteCommand 填进 OLED 字库了 —— 编过、能跑、屏幕不亮，最难查的一种。
+ * 这个工具是给 OLED 用的，认驱动时优先名字里带 OLED 的那套，其次带控制器
+ * 型号的；都没有就按「跟字符显示函数是不是同一套」来定。
+ */
+int driverBias(const QString &name)
+{
+	const QString l = name.toLower();
+	if (l.contains(QLatin1String("oled")))
+	{
+		return 100;
+	}
+	if (l.contains(QLatin1String("ssd1306")) || l.contains(QLatin1String("sh1106")))
+	{
+		return 90;
+	}
+	return 0;
+}
+
+/* 挑最像的一组里最像的那一条：同文件加权最高，其次是名字公共前缀。
+ * 全都一样时按扫描顺序取第一个（NaN 情况下的老行为不变）。 */
+const Cand *pickBest(const QVector<Cand> &v, const Cand *anchor)
+{
+	if (v.isEmpty())
+	{
+		return nullptr;
+	}
+	const Cand *best = &v.at(0);
+	int bestScore = -1;
+	for (const Cand &c : v)
+	{
+		int s = driverBias(c.name);
+		if (anchor)
+		{
+			if (c.path == anchor->path)
+			{
+				s += 50;
+			}
+			s += commonPrefixLen(c.name, anchor->name);
+		}
+		if (s > bestScore)
+		{
+			bestScore = s;
+			best = &c;
+		}
+	}
+	return best;
+}
+
 }   // namespace
 
 namespace LibProbe
@@ -153,14 +257,103 @@ QString nameOf(LibStyle s)
 	}
 }
 
+QStringList projectMarkers()
+{
+	/* 这些文件是「这里是一个工程」的硬定义，跟源码怎么起名无关。
+	 * 判据不能是"有没有 OLED.c"—— 别人叫 lcd.c / ssd1306.c 一样是驱动。 */
+	return QStringList {
+		QStringLiteral("*.uvprojx"),       /* Keil MDK 5 */
+		QStringLiteral("*.uvproj"),        /* Keil MDK 4 */
+		QStringLiteral("*.ewp"),           /* IAR EWARM */
+		QStringLiteral(".cproject"),       /* STM32CubeIDE / Eclipse CDT */
+		QStringLiteral(".mxproject"),      /* STM32CubeMX 生成 */
+		QStringLiteral("platformio.ini")   /* PlatformIO */
+	};
+}
+
+namespace
+{
+
+bool hasProjectMarker(const QDir &d)
+{
+	if (!d.exists())
+	{
+		return false;
+	}
+	return !d.entryList(projectMarkers(), QDir::Files | QDir::Hidden).isEmpty();
+}
+
+bool hasSourceFiles(const QDir &d)
+{
+	static const QStringList pat = {
+		QStringLiteral("*.c"), QStringLiteral("*.h"),
+		QStringLiteral("*.cpp"), QStringLiteral("*.hpp")
+	};
+	return d.exists() && !d.entryList(pat, QDir::Files).isEmpty();
+}
+
+}   // namespace
+
+QString projectRootOf(const QString &anyPath)
+{
+	if (anyPath.trimmed().isEmpty())
+	{
+		return QString();
+	}
+
+	const QFileInfo fi(anyPath);
+	QDir d = fi.isDir() ? QDir(anyPath) : QDir(fi.absolutePath());
+	if (!d.exists())
+	{
+		return QString();
+	}
+
+	/* 1) 往上找最近的、带工程文件的目录。
+	 *    Hardware\OLED_CFont.h  → 工程根
+	 *    OLED_CFont.h（在根）    → 工程根自己，而不是装着所有课的上一层 */
+	QDir cur = d;
+	for (int up = 0; up < 3; ++up)
+	{
+		if (hasProjectMarker(cur))
+		{
+			return cur.absolutePath();
+		}
+		if (!cur.cdUp())
+		{
+			break;
+		}
+	}
+
+	/* 2) 没有工程文件：这一层直接放着源码，就算工程的一部分，并到
+	 *    上一层不再直接放源码为止。有人把驱动和 main.c 整个拷成一个
+	 *    文件夹，没有 .uvprojx，也得能用。 */
+	if (hasSourceFiles(d))
+	{
+		QDir top = d;
+		for (int up = 0; up < 2; ++up)
+		{
+			QDir parent = top;
+			if (!parent.cdUp() || !hasSourceFiles(parent))
+			{
+				break;
+			}
+			top = parent;
+		}
+		return top.absolutePath();
+	}
+
+	/* 3) 什么都不像 —— 返回空。宁可这次不认，也不能认到隔壁工程头上：
+	 *    写错了不报错、只是编不过或者屏幕不亮，没人会想到是取模工具干的。 */
+	return QString();
+}
+
 namespace
 {
 
 /* 一次扫描把所有要认的东西都收齐。认内容不认文件名 */
 void scanOne(const QString &path, Result *r, int *stdScore, int *halScore,
              Hit *delayDef, Hit *delayMs, Hit *delayHal, Hit *delayRtos,
-             Hit *twoCmd, Hit *twoData, Hit *flagByte, Hit *showChar,
-             QStringList *evidence)
+             Bag *bag, QStringList *evidence)
 {
 	const QFileInfo fi(path);
 	const QString name = fi.fileName();
@@ -306,20 +499,17 @@ void scanOne(const QString &path, Result *r, int *stdScore, int *halScore,
 	m = reCmd.match(text);
 	if (m.hasMatch())
 	{
-		note(twoCmd, m.captured(1), name, lineOf(text, m.capturedStart()),
-		     QStringLiteral("%1：写命令函数 %2").arg(name, m.captured(1)));
+		addCand(&bag->cmd, m.captured(1), name, path, lineOf(text, m.capturedStart()));
 	}
 	m = reData.match(text);
 	if (m.hasMatch())
 	{
-		note(twoData, m.captured(1), name, lineOf(text, m.capturedStart()),
-		     QStringLiteral("%1：写数据函数 %2").arg(name, m.captured(1)));
+		addCand(&bag->data, m.captured(1), name, path, lineOf(text, m.capturedStart()));
 	}
 	m = reByte.match(text);
 	if (m.hasMatch())
 	{
-		note(flagByte, m.captured(1), name, lineOf(text, m.capturedStart()),
-		     QStringLiteral("%1：写字节函数 %2（带 cmd 标志位）").arg(name, m.captured(1)));
+		addCand(&bag->byte, m.captured(1), name, path, lineOf(text, m.capturedStart()));
 	}
 
 	/* ---- 字符显示函数 ---- */
@@ -328,8 +518,7 @@ void scanOne(const QString &path, Result *r, int *stdScore, int *halScore,
 	m = reShowChar.match(text);
 	if (m.hasMatch())
 	{
-		note(showChar, m.captured(1), name, lineOf(text, m.capturedStart()),
-		     QStringLiteral("%1：有字符显示函数 %2").arg(name, m.captured(1)));
+		addCand(&bag->show, m.captured(1), name, path, lineOf(text, m.capturedStart()));
 	}
 }
 
@@ -347,49 +536,65 @@ Result probeFiles(const QStringList &files)
 	int stdScore = 0;
 	int halScore = 0;
 	Hit delayDef, delayMs, delayHal, delayRtos;
-	Hit twoCmd, twoData, flagByte, showChar;
+	Bag bag;
 	QStringList evidence;
 
 	for (const QString &f : files)
 	{
 		scanOne(f, &r, &stdScore, &halScore,
 		        &delayDef, &delayMs, &delayHal, &delayRtos,
-		        &twoCmd, &twoData, &flagByte, &showChar, &evidence);
+		        &bag, &evidence);
 	}
 
 	if (stdScore > halScore)
 	{
 		r.lib = StandardPeriph;
-		r.file = twoCmd.file.isEmpty() ? delayDef.file : twoCmd.file;
 	}
 	else if (halScore > stdScore)
 	{
 		r.lib = HAL;
 	}
 
-	/* 写命令写法：两个函数优先。中景园新版 / 多数 HAL 例程是这样，
-	 * 也是头文件注释里的 (A)，和改造前的默认值一致 */
-	if (twoCmd.found && twoData.found)
+	/* 先挑字符显示函数：它是这套驱动的主锚点，写命令 / 写数据都按
+	 * 「跟它是不是同一套」来选，这样 LCD 和 OLED 同时存在时不会拼出
+	 * LCD_WriteCommand + OLED_ShowChar 这种根本不存在的组合。 */
+	const Cand *show = pickBest(bag.show, nullptr);
+	if (show)
 	{
-		r.write   = TwoFuncs;
-		r.cmdFunc = twoCmd.name;
-		r.dataFunc = twoData.name;
-		r.file = twoCmd.file;
-		r.line = twoCmd.line;
-		evidence.prepend(twoCmd.what);
-	}
-	else if (flagByte.found)
-	{
-		r.write    = FlagByte;
-		r.byteFunc = flagByte.name;
-		r.file     = flagByte.file;
-		r.line     = flagByte.line;
-		evidence.prepend(flagByte.what);
+		r.showAsciiFunc = show->name;
+		r.file = show->file;
+		r.line = show->line;
 	}
 
-	if (showChar.found)
+	/* 写命令写法：两个函数优先。中景园新版 / 多数 HAL 例程是这样，
+	 * 也是头文件注释里的 (A)，和改造前的默认值一致 */
+	if (!bag.cmd.isEmpty() && !bag.data.isEmpty())
 	{
-		r.showAsciiFunc = showChar.name;
+		const Cand *c = pickBest(bag.cmd, show);
+		const Cand *d = pickBest(bag.data, c);
+		if (c && d)
+		{
+			r.write    = TwoFuncs;
+			r.cmdFunc  = c->name;
+			r.dataFunc = d->name;
+			r.file     = c->file;
+			r.line     = c->line;
+			evidence.prepend(QStringLiteral("%1：写命令函数 %2")
+			                 .arg(c->file, c->name));
+		}
+	}
+	else if (!bag.byte.isEmpty())
+	{
+		const Cand *b = pickBest(bag.byte, show);
+		if (b)
+		{
+			r.write    = FlagByte;
+			r.byteFunc = b->name;
+			r.file     = b->file;
+			r.line     = b->line;
+			evidence.prepend(QStringLiteral("%1：写字节函数 %2（带 cmd 标志位）")
+			                 .arg(b->file, b->name));
+		}
 	}
 
 	/* 延时：定义 > 工程自己的调用 > HAL > RTOS。

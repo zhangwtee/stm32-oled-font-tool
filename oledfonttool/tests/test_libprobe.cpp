@@ -291,6 +291,74 @@ static void testDriverWithCmdMacro(const QString &root)
 	      r.write == LibProbe::TwoFuncs, QString::number(static_cast<int>(r.write)));
 }
 
+/* 字库放在工程根时，不能把「装着所有课的上一层」当成工程根。
+ *
+ * 起因：反推工程根原来是"往上退一层"。字库在 <工程>\Hardware\ 时正好对，
+ * 可导出时字库也可以直接放在工程根，那时退一层拿到的是上一级目录 ——
+ * 拿它去扫源码，会认到隔壁工程的驱动上，然后把别人的函数名写进这个
+ * 工程的字库里。编过、能跑、屏幕不亮，没人会想到是取模工具干的。 */
+static void testProjectRootByMarker(const QString &root)
+{
+	const QString ws  = root + QStringLiteral("/rootmark");
+	const QString a   = ws + QStringLiteral("/Aother");   /* 名字排在前面，先被扫到 */
+	const QString proj = ws + QStringLiteral("/projA");
+
+	writeFile(a + QStringLiteral("/OLED.c"),
+	          "void LCD_WriteCommand(uint8_t c)\n{\n}\n"
+	          "void LCD_WriteData(uint8_t d)\n{\n}\n"
+	          "void LCD_ShowChar(uint8_t x, uint8_t y, char ch)\n{\n}\n");
+	writeFile(proj + QStringLiteral("/proj.uvprojx"), "\n");
+	writeFile(proj + QStringLiteral("/OLED_CFont.h"),
+	          "#ifndef __OLED_CFONT_H\n#define __OLED_CFONT_H\n#endif\n");
+	writeFile(proj + QStringLiteral("/Hardware/OLED.c"),
+	          "void OLED_WriteCommand(uint8_t c)\n{\n}\n"
+	          "void OLED_WriteData(uint8_t d)\n{\n}\n"
+	          "void OLED_ShowChar(uint8_t line, uint8_t col, char ch)\n{\n}\n"
+	          "void OLED_Init(void)\n{\n}\n");
+
+	check("工程根：字库在工程根时认出 projA",
+	      LibProbe::projectRootOf(proj + QStringLiteral("/OLED_CFont.h")) == proj,
+	      LibProbe::projectRootOf(proj + QStringLiteral("/OLED_CFont.h")));
+	check("工程根：字库在 Hardware 下时也认出 projA",
+	      LibProbe::projectRootOf(proj + QStringLiteral("/Hardware/OLED_CFont.h")) == proj,
+	      LibProbe::projectRootOf(proj + QStringLiteral("/Hardware/OLED_CFont.h")));
+	check("工程根：装着多个工程的上一层不认",
+	      LibProbe::projectRootOf(ws).isEmpty(), LibProbe::projectRootOf(ws));
+
+	/* 这一条是重点：按工程根扫，认到的必须是本工程的驱动 */
+	const LibProbe::Result r = LibProbe::probe(
+	        LibProbe::projectRootOf(proj + QStringLiteral("/OLED_CFont.h")));
+	check("工程根：不会认到隔壁工程的 LCD_WriteCommand",
+	      r.cmdFunc == QStringLiteral("OLED_WriteCommand"), r.cmdFunc);
+}
+
+/* 一个工程里同时挂着 LCD 和 OLED 两套驱动（课设里常见）。
+ *
+ * 「先到先得」会按目录名顺序取第一个：LCD.c 排在 OLED.c 前面，于是把
+ * LCD_WriteCommand 填进 OLED 字库，甚至连 LCD_WriteCommand + OLED_ShowChar
+ * 这种根本不存在的组合都可能拼出来。 */
+static void testTwoDrivers(const QString &root)
+{
+	const QString dir = root + QStringLiteral("/twodrv");
+	writeFile(dir + QStringLiteral("/proj.uvprojx"), "\n");
+	writeFile(dir + QStringLiteral("/Hardware/LCD.c"),
+	          "void LCD_WriteCommand(uint8_t c)\n{\n}\n"
+	          "void LCD_WriteData(uint8_t d)\n{\n}\n"
+	          "void LCD_ShowChar(uint8_t x, uint8_t y, char ch)\n{\n}\n");
+	writeFile(dir + QStringLiteral("/Hardware/OLED.c"),
+	          "void OLED_WriteCommand(uint8_t c)\n{\n}\n"
+	          "void OLED_WriteData(uint8_t d)\n{\n}\n"
+	          "void OLED_ShowChar(uint8_t line, uint8_t col, char ch)\n{\n}\n");
+
+	const LibProbe::Result r = LibProbe::probe(dir);
+	check("两套驱动：写命令挑 OLED 那套",
+	      r.cmdFunc == QStringLiteral("OLED_WriteCommand"), r.cmdFunc);
+	check("两套驱动：写数据跟写命令同一套",
+	      r.dataFunc == QStringLiteral("OLED_WriteData"), r.dataFunc);
+	check("两套驱动：字符显示也挑 OLED 那套",
+	      r.showAsciiFunc == QStringLiteral("OLED_ShowChar"), r.showAsciiFunc);
+}
+
 int main(int argc, char *argv[])
 {
 	QCoreApplication app(argc, argv);
@@ -334,6 +402,8 @@ int main(int argc, char *argv[])
 	testSelfPollution(root);
 	testHalInDrivers(root);
 	testDriverWithCmdMacro(root);
+	testProjectRootByMarker(root);
+	testTwoDrivers(root);
 	testRewrite(root);
 	testNoTouchWhenUnknown(root);
 

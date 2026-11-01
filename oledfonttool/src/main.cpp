@@ -189,20 +189,15 @@ static QString findFileUnder(const QString &base, const QString &fileName, int m
 	return QString();
 }
 
-/* 从字库路径反推工程根目录：字库在 <工程>\Hardware\ 下，往上一级就是工程根。
- * 不依赖工程叫什么名字。 */
+/* 从字库路径反推工程根目录。
+ *
+ * 以前是「往上退一层」：字库在 <工程>\Hardware\ 时正好是工程根。但字库
+ * 也可能就放在工程根（导出时是允许的），那时再退一层拿到的是"装着所有
+ * 课的上一层"，拿它去扫源码会认到隔壁工程的驱动上。判据交给 LibProbe：
+ * 找最近的、带工程文件的目录，找不到就说不知道。 */
 static QString findProjectRoot(const QString &headerPath)
 {
-	if (headerPath.isEmpty())
-	{
-		return QString();
-	}
-	QDir d(QFileInfo(headerPath).absolutePath());   // ...\Hardware
-	if (d.cdUp())                                  // ...\<工程>
-	{
-		return d.absolutePath();
-	}
-	return QString();
+	return LibProbe::projectRootOf(headerPath);
 }
 
 /* ============================================================================
@@ -224,17 +219,12 @@ static QString findProjectRoot(const QString &headerPath)
  *   已有字库的目录 → 常见源码目录名 → 工程根。
  * ==========================================================================*/
 
-/* 各 IDE 用来标记"这里是工程"的文件。带 * 的通配。 */
+/* 各 IDE 用来标记"这里是工程"的文件。带 * 的通配。
+ * 清单放在 LibProbe 里 —— 反推工程根（projectRootOf）和这里向下找工程
+ * 用的是同一套判据，两处各写一份迟早会不一样。 */
 static QStringList projectMarkers()
 {
-	return QStringList {
-		QStringLiteral("*.uvprojx"),       /* Keil MDK 5 */
-		QStringLiteral("*.uvproj"),        /* Keil MDK 4 */
-		QStringLiteral("*.ewp"),           /* IAR EWARM */
-		QStringLiteral(".cproject"),       /* STM32CubeIDE / Eclipse CDT */
-		QStringLiteral(".mxproject"),      /* STM32CubeMX 生成 */
-		QStringLiteral("platformio.ini")   /* PlatformIO */
-	};
+	return LibProbe::projectMarkers();
 }
 
 /*
@@ -3541,10 +3531,14 @@ int MainWindow::currentScreenH() const
  * 结果按工程根缓存：同一工程只扫一遍目录。 */
 LibProbe::CodeAdapter MainWindow::currentAdapter(const QString &hintPath)
 {
-	QString root = findProjectRoot(m_headerPath);
+	/* 先看 hintPath —— 调用方传进来的是「这次要写的那个文件」，
+	 * 它所在的工程才是要认的工程。以前这里反过来：m_headerPath 有值就
+	 * 一律用它，于是导到 B 工程的字库会带 A 工程的写命令函数 —— 编不过
+	 * 还看不出为什么。 */
+	QString root = LibProbe::projectRootOf(hintPath);
 	if (root.isEmpty())
 	{
-		root = findProjectRoot(hintPath);
+		root = LibProbe::projectRootOf(m_headerPath);
 	}
 	if (root.isEmpty())
 	{
@@ -3556,30 +3550,11 @@ LibProbe::CodeAdapter MainWindow::currentAdapter(const QString &hintPath)
 		return m_adapter;
 	}
 
-	/* 字库不一定正好放在工程根下面一层（有人会建 Hardware/Fonts/）。
-	 * 往上再退两级试试：找到第一层能认出来的就算数。
-	 * 都不行就返回默认值 —— 不猜。 */
-	QString dir = root;
-	for (int up = 0; up < 3 && !dir.isEmpty(); ++up)
-	{
-		const LibProbe::Result r = LibProbe::probe(dir);
-		if (r.any())
-		{
-			m_adapter     = LibProbe::adapterOf(r);
-			m_adapterRoot = root;
-			m_adapterDone = true;
-			return m_adapter;
-		}
-
-		QDir d(dir);
-		if (!d.cdUp())
-		{
-			break;
-		}
-		dir = d.absolutePath();
-	}
-
-	m_adapter     = LibProbe::CodeAdapter();
+	/* root 已经是工程根了，只扫这一处。
+	 * 以前还往上再退两级"试试"——退到的是装着多个工程的上层目录，
+	 * 扫到隔壁的驱动就把别人的函数名填进这个工程，比认不出来糟得多。 */
+	const LibProbe::Result r = LibProbe::probe(root);
+	m_adapter     = LibProbe::adapterOf(r);
 	m_adapterRoot = root;
 	m_adapterDone = true;
 	return m_adapter;
