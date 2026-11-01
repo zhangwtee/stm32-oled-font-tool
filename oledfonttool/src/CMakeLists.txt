@@ -33,6 +33,7 @@ qt_add_executable(oledmatrix
     chipinfo.cpp
     mergeproject.cpp
     screenprobe.cpp
+    libprobe.cpp
     selftest.cpp
     app.rc          # 图标 + 版本信息（exe 属性里才有名字和版本号）
 )

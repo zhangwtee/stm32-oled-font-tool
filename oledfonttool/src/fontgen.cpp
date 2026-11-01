@@ -365,7 +365,7 @@ qint64 FontGen::flashBytes(int count, int size, bool withAsciiFont)
 }
 
 QString FontGen::generateHeader(const QString &text, QString *errorOut, int colOffset,
-                               int screenH) const
+                               int screenH, const LibProbe::CodeAdapter &adapter) const
 {
 	/* 只可能是 0 或 2，但别让传进来的野值把生成的宏写坏 */
 	if (colOffset < 0)
@@ -560,11 +560,18 @@ QString FontGen::generateHeader(const QString &text, QString *errorOut, int colO
  *      #define CF_SHOW_ASCII(line, col, ch)  ((void)0)
  *  这样英文字符被跳过，汉字位置仍然连续。
  * ========================================================================== */
-#define CF_WRITE_CMD(c)                 OLED_WriteCommand(c)
-#define CF_WRITE_DATA(d)                OLED_WriteData(d)
-#define CF_SHOW_ASCII(line, col, ch)    OLED_ShowChar((line), (col), (ch))
+)CF");
 
-/* 屏是 SH1106（显存 132 列，可见区从第 2 列开始）时是 2，SSD1306 是 0。
+	/* 适配区这几个宏原来写死在这里。现在改成按工程源码算 —— 标准库工程里
+	 * 没有 HAL_Delay，正点原子那套驱动也没有 OLED_WriteCommand，默认值填
+	 * 错了就是「导出成功、编译报错」，而报错只指到「未定义的标识符」，
+	 * 指不到取模工具头上。探测不出来时 adapter 里还是老默认值，行为不变。 */
+	out += LibProbe::adapterNote(adapter);
+	out += QStringLiteral("#define CF_WRITE_CMD(c)                 %1\n").arg(adapter.writeCmd);
+	out += QStringLiteral("#define CF_WRITE_DATA(d)                %1\n").arg(adapter.writeData);
+	out += QStringLiteral("#define CF_SHOW_ASCII(line, col, ch)    %1\n\n").arg(adapter.showAscii);
+
+	out += QStringLiteral(R"CF(/* 屏是 SH1106（显存 132 列，可见区从第 2 列开始）时是 2，SSD1306 是 0。
    这个值是导出时按驱动源码自动判断后填进来的，一般不用改；
    万一判断错了（右边框缺两列、整幅左移 2 像素），把它改成 2 或 0 即可。 */
 #define CF_COL_OFFSET                   %1

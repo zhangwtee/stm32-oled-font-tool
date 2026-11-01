@@ -14,6 +14,8 @@
 #include <QVector>
 #include <QtGlobal>
 
+#include "libprobe.h"
+
 /*
  * 把图片 / 动画帧转成 OLED 显存格式的点阵数据。
  *
@@ -110,12 +112,16 @@ public:
      * 换成以它打头的名字（logo → LOGO_WIDTH / Logo_ShowFrame），
      * 几份头文件就能同时 include 进一个工程，不会撞宏定义。
      * 不传（空）时输出和以前逐字节相同。
+     *
+     * adapter：适配区填什么（写命令 / 写数据 / 延时）。由 LibProbe 按工程源码
+     * 算出来；不传就是老默认值（HAL_Delay 那套），老调用点行为不变。
      */
     static QString renderHeader(const QVector<QVector<quint8>> &frames,
                                 const Options &opt,
                                 int delayMs,
                                 const QString &sourceName,
-                                const QString &ident = QString());
+                                const QString &ident = QString(),
+                                const LibProbe::CodeAdapter &adapter = LibProbe::CodeAdapter());
 
     /*
      * 渲染并写盘（UTF-8）。成功返回空字符串，失败返回原因。
@@ -126,7 +132,8 @@ public:
                                    const Options &opt,
                                    int delayMs,
                                    const QString &sourceName,
-                                   const QString &ident = QString());
+                                   const QString &ident = QString(),
+                                   const LibProbe::CodeAdapter &adapter = LibProbe::CodeAdapter());
 
     /*
      * 一份素材，给「多份打包进一个 .h」用。
@@ -157,12 +164,14 @@ public:
      * 两份打包文件同时 include 也不会互相吃掉。为空时用 __OLED_ASSETS_H。
      */
     static QString renderMultiHeader(const QVector<Asset> &assets,
-                                     const QString &title = QString());
+                                     const QString &title = QString(),
+                                     const LibProbe::CodeAdapter &adapter = LibProbe::CodeAdapter());
 
     /* 同上的写盘版本 */
     static QString writeMultiHeaderFile(const QString &path,
                                         const QVector<Asset> &assets,
-                                        const QString &title = QString());
+                                        const QString &title = QString(),
+                                        const LibProbe::CodeAdapter &adapter = LibProbe::CodeAdapter());
 
     /*
      * 把任意字符串收拾成能当 C 标识符的名字：

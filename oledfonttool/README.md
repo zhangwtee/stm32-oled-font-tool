@@ -1,6 +1,6 @@
 # OLED 点阵取模工具
 
-给 STM32 + SSD1306 工程配套的点阵取模工具，两条产线共用同一套导出格式：
+给 STM32 + SSD1306 工程配套的点阵取模工具，汉字和图片/动画都能转，共用同一套导出格式：
 
 - **汉字**：输入文字 → 实时看点阵 → 导出 `OLED_CFont.h`，
   一个字一个字地手攒字模这件事就不必再做了
@@ -65,6 +65,7 @@ oledfonttool\
     selftest.cpp/.h        整屏自检帧的生成与导出
     mergeproject.cpp/.h    一键接入工程：读驱动、补声明/补 include/补示例
     screenprobe.cpp/.h     屏控制器探测：SSD1306 还是 SH1106，定列偏移
+    libprobe.cpp/.h        工程底子探测：标准库还是 HAL、延时函数、写命令写法
     chipinfo.cpp/.h        芯片 Flash 容量：读 IROM / 链接脚本 / 型号解码
     CMakeLists.txt
     build_cfont.py         【命令行主入口】改这里加字
@@ -455,6 +456,35 @@ Qt 版实现在 `src\fontgen.cpp`，Python 版在 `src\gen_oled_hz.py`。
 #define CF_WRITE_DATA(d)                OLED_WriteData(d)
 #define CF_SHOW_ASCII(line, col, ch)    OLED_ShowChar((line), (col), (ch))  /* 英文字符 */
 ```
+
+### 这几个宏现在是工具自己填的
+
+以前它们是写死的默认值，而默认值只对「中景园新版驱动 + HAL 库」成立。
+标准库工程里没有 `HAL_Delay`，正点原子那套驱动里也没有 `OLED_WriteCommand` ——
+导出的文件看着没问题，Keil 一编译就报「未定义的标识符」，报错还指不到取模工具头上。
+
+现在导出前会先读一眼工程源码，认出四件事：
+
+| 认什么 | 判据（认内容，不认文件名） |
+| --- | --- |
+| 标准库 / HAL | `stm32f10x.h`、`RCC_APB2PeriphClockCmd(` ↔ `stm32f1xx_hal.h`、`HAL_Init(` |
+| 延时函数 | 先找 `void Delay_ms(...)` 这类定义，再退一步找 `Delay_ms(` / `HAL_Delay(` / `vTaskDelay(` |
+| 写命令写法 | `XxxWriteCommand + XxxWriteData`（两个函数）还是 `Xxx_WR_Byte(d, 1)`（带标志位） |
+| 字符显示函数 | `XxxShowChar(...)` |
+
+认出来就按你的工程填，并在文件里注明来源：
+
+```c
+/*  适配区来源：按你的工程源码自动识别 —— 标准库 · 延时 Delay_ms(ms) · 写命令 OLED_WriteCommand / OLED_WriteData
+ *  认错了就直接改下面几行；下次导出会重新认一遍，不会记住错的那次。 */
+#define CF_WRITE_CMD(c)                 OLED_WriteCommand(c)
+```
+
+认不出来（没有工程上下文、或者工程太特殊）就**一个字都不加**，输出和以前
+逐字节相同，还是那套默认值 —— 不会把没探测到的情况伪装成"已经适配好了"。
+
+「一键接入工程」时也会对一遍：头文件里的适配区和探测结果不一致就改过来
+（改前照例备份 `.oledbak`），免得接完了还要手改这一块。
 
 然后：
 

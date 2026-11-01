@@ -14,6 +14,8 @@
 #include <QMap>
 #include <QFont>
 
+#include "libprobe.h"
+
 /*
  * 把汉字渲染成 N×N 点阵，并编码成 OLED 驱动要的字节格式。
  *
@@ -110,9 +112,13 @@ public:
 	   colOffset：SH1106（132 列）填 2，SSD1306 填 0。默认 0，导出时由界面传入。
 	   screenH  ：屏的像素高度（64 / 32）。写进 CF_SCREEN_H，显示函数用它判断
 	              第几行还放得下 —— 128×32 的屏只有 4 页，按 64 写会往不存在的
-	              页地址里灌数据。 */
+	              页地址里灌数据。
+	   adapter  ：适配区那四个宏填什么（写命令 / 写数据 / 字符 / 延时）。
+	              由 LibProbe 按工程源码算出来；不传就是老默认值，
+	              所以老的调用点行为完全不变。 */
 	QString generateHeader(const QString &text, QString *errorOut = nullptr,
-	                       int colOffset = 0, int screenH = 64) const;
+	                       int colOffset = 0, int screenH = 64,
+	                       const LibProbe::CodeAdapter &adapter = LibProbe::CodeAdapter()) const;
 
 	/* 统计 */
 	static int glyphCount(const QString &text);

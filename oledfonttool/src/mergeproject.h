@@ -34,6 +34,8 @@
 #include <QStringList>
 #include <QVector>
 
+#include "libprobe.h"
+
 namespace MergeProject {
 
 /* 一处插入 */
@@ -100,6 +102,27 @@ bool apply(const Scan &scan, QStringList *touched, QString *err);
 
 /* 从 .oledbak 还原。files 传 apply() 吐出来的那个列表 */
 bool revert(const QStringList &files, QString *err);
+
+/* ---- 适配区体检 / 改写 ----
+ *
+ * 一键接入只补「声明 / include / 示例」，改不了适配区那四行宏。而适配区
+ * 决定了这个头文件能不能编过：标准库工程里没有 HAL_Delay，正点原子那套
+ * 驱动里也没有 OLED_WriteCommand。
+ *
+ * 所以接入的时候顺手对一遍：拿工程探测结果和头文件里的实际值比，不一致
+ * 就改过来（改前先备份 .oledbak，和不改别的原则不冲突 —— 这几行本来
+ * 就是工具生成的默认值，不是用户手写的业务代码）。
+ *
+ * 两个函数都只认 ASCII 宏定义行，文件是 UTF-8 还是 GBK、有没有 BOM 都不影响：
+ * 落盘时按字节原样写回，只替换宏后面那段值。
+ */
+
+/* 不一致的行，人话描述。空 = 一致，或文件里压根没有适配区 */
+QStringList adapterMismatch(const QString &headerPath, const LibProbe::CodeAdapter &adapter);
+
+/* 按探测结果改写。返回改了几行；backedUp 告诉调用方这次有没有生成备份 */
+int applyAdapter(const QString &headerPath, const LibProbe::CodeAdapter &adapter,
+                 bool *backedUp, QString *err);
 
 /* 有没有备份可退（用来决定「撤销」按钮亮不亮） */
 QStringList revertable(const QStringList &files);

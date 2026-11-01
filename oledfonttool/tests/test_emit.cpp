@@ -116,6 +116,46 @@ int main(int argc, char **argv)
 		h3.replace(reH, QStringLiteral("#define CF_SCREEN_H X"));
 		check("屏高也只改这一行", a3 == h3);
 
+		/* 适配区：不传 adapter 时必须还是改造前那几个死值 —— 老调用点逐字节不变 */
+		check("默认适配区仍是 OLED_WriteCommand",
+		      a.contains(QStringLiteral("#define CF_WRITE_CMD(c)                 OLED_WriteCommand(c)"))
+		          && a.contains(QStringLiteral("#define CF_WRITE_DATA(d)                OLED_WriteData(d)")),
+		      QString());
+		check("默认适配区不加任何来源注释（老输出逐字节不变）",
+		      !a.contains(QStringLiteral("适配区来源")), QString());
+
+		/* 传了 adapter 就按工程探测结果填（标准库 + 正点原子那套驱动） */
+		LibProbe::Result lr;
+		lr.lib         = LibProbe::StandardPeriph;
+		lr.write       = LibProbe::FlagByte;
+		lr.byteFunc    = QStringLiteral("OLED_WR_Byte");
+		lr.showAsciiFunc = QStringLiteral("OLED_ShowChar");
+		lr.delayCall   = QStringLiteral("Delay_ms(ms)");
+		const LibProbe::CodeAdapter ad = LibProbe::adapterOf(lr);
+
+		const QString withAd = gen.generateHeader(QStringLiteral("温度正常"), &err, 0, 64, ad);
+		check("适配区：写命令换成标志位写法",
+		      withAd.contains(QStringLiteral("#define CF_WRITE_CMD(c)                 OLED_WR_Byte((c), 1)")),
+		      QString());
+		check("适配区：写数据也跟着换",
+		      withAd.contains(QStringLiteral("#define CF_WRITE_DATA(d)                OLED_WR_Byte((d), 0)")),
+		      QString());
+		check("适配区：不再出现 HAL_Delay",
+		      !withAd.contains(QStringLiteral("HAL_Delay")), QString());
+		check("适配区：注释里写了识别依据",
+		      withAd.contains(QStringLiteral("适配区来源")), QString());
+
+		/* 换了适配区，点阵数据本身一个字节都不能变。字模表在适配区之前，
+		 * 所以比「从第一个 0x 到适配区注释」这一段。 */
+		const QString dataA = a.mid(a.indexOf(QStringLiteral("0x")),
+		                            a.indexOf(QStringLiteral("适配区：只改这里"))
+		                                - a.indexOf(QStringLiteral("0x")));
+		const QString dataB = withAd.mid(withAd.indexOf(QStringLiteral("0x")),
+		                                 withAd.indexOf(QStringLiteral("适配区：只改这里"))
+		                                     - withAd.indexOf(QStringLiteral("0x")));
+		check("适配区换了但字模数据不变", dataA == dataB,
+		      QStringLiteral("%1 vs %2 字节").arg(dataA.size()).arg(dataB.size()));
+
 		writeFile(QDir(outDir).absoluteFilePath(QStringLiteral("OLED_CFont32.h")), h32);
 
 		/* 头文件自己 include <stdint.h>：不写的话它用 uint8_t 全靠调用方
@@ -241,6 +281,44 @@ int main(int argc, char **argv)
 		      QStringLiteral("got %1").arg(macroValue(c0, QStringLiteral("ANIM_COL_OFFSET"))));
 
 		writeFile(QDir(outDir).absoluteFilePath(QStringLiteral("anim.h")), content);
+
+		/* 适配区：动图这份以前写死 HAL_Delay，标准库工程导出来直接编不过 */
+		check("动图默认适配区仍是 HAL_Delay",
+		      content.contains(QStringLiteral("#define ANIM_DELAY(ms)       HAL_Delay(ms)")),
+		      QString());
+
+		LibProbe::Result lr;
+		lr.lib       = LibProbe::StandardPeriph;
+		lr.delayCall = QStringLiteral("Delay_ms(ms)");
+		lr.write     = LibProbe::FlagByte;
+		lr.byteFunc  = QStringLiteral("OLED_WR_Byte");
+		const LibProbe::CodeAdapter ad = LibProbe::adapterOf(lr);
+
+		const QString withAd = ImageGen::renderHeader(frames, opt, 100,
+		                                              QStringLiteral("test.gif"),
+		                                              QString(), ad);
+		check("动图适配区：延时换成 Delay_ms",
+		      withAd.contains(QStringLiteral("#define ANIM_DELAY(ms)       Delay_ms(ms)")),
+		      QString());
+		check("动图适配区：不再把 HAL_Delay 当默认值",
+		      !withAd.contains(QStringLiteral("#define ANIM_DELAY(ms)       HAL_Delay(ms)")),
+		      QString());
+
+		/* 帧数据不受适配区影响 */
+		const QString fa = content.mid(content.indexOf(QStringLiteral("0x")));
+		const QString fb = withAd.mid(withAd.indexOf(QStringLiteral("0x")));
+		check("动图适配区换了但帧数据不变", fa == fb, QString());
+
+		/* 多素材打包那份是另一个生成器，也要按 adapter 填 */
+		ImageGen::Asset asset;
+		asset.ident  = QStringLiteral("logo");
+		asset.frames = frames;
+		asset.opt    = opt;
+		const QString multi = ImageGen::renderMultiHeader(QVector<ImageGen::Asset>() << asset,
+		                                                  QStringLiteral("assets.h"), ad);
+		check("多素材适配区：延时换成 Delay_ms",
+		      multi.contains(QStringLiteral("#define OLED_DELAY(ms)       Delay_ms(ms)")),
+		      QString());
 	}
 
 	/* ---------------- 动画帧去重 ---------------- */

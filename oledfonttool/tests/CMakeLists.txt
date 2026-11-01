@@ -26,11 +26,13 @@ target_include_directories(test_probe PRIVATE ../src)
 target_link_libraries(test_probe PRIVATE Qt6::Core)
 
 # 生成内容的测试要真的渲染字体，所以多一条 Gui
+# libprobe 是 fontgen/imagegen 生成适配区时的依赖，缺了会链接不过
 add_executable(test_emit
     test_emit.cpp
     ../src/fontgen.cpp
     ../src/imagegen.cpp
     ../src/selftest.cpp
+    ../src/libprobe.cpp
 )
 target_include_directories(test_emit PRIVATE ../src)
 target_link_libraries(test_emit PRIVATE Qt6::Gui)
@@ -50,6 +52,15 @@ add_executable(test_merge
 )
 target_include_directories(test_merge PRIVATE ../src)
 target_link_libraries(test_merge PRIVATE Qt6::Core)
+
+# 工程底子探测 + 适配区改写：纯文件扫描，只要 Core
+add_executable(test_libprobe
+    test_libprobe.cpp
+    ../src/libprobe.cpp
+    ../src/mergeproject.cpp
+)
+target_include_directories(test_libprobe PRIVATE ../src)
+target_link_libraries(test_libprobe PRIVATE Qt6::Core)
 
 # 把样例驱动复制到 exe 旁边，运行时不用带参数
 add_custom_command(TARGET test_probe POST_BUILD

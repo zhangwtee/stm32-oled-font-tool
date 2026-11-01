@@ -429,7 +429,8 @@ QString ImageGen::renderHeader(const QVector<QVector<quint8>> &frames,
                                const Options &opt,
                                int delayMs,
                                const QString &sourceName,
-                               const QString &ident)
+                               const QString &ident,
+                               const LibProbe::CodeAdapter &adapter)
 {
     const int frameSize = bytesPerFrame(opt.width, opt.height);
     const int count = frames.size();
@@ -564,10 +565,12 @@ QString ImageGen::renderHeader(const QVector<QVector<quint8>> &frames,
     s += QStringLiteral(" *      void OLED_WriteCommand(uint8_t cmd);\n");
     s += QStringLiteral(" *      void OLED_WriteData(uint8_t dat);\n");
     s += QStringLiteral(" * ============================================================ */\n");
-    s += QStringLiteral("#define ANIM_WRITE_CMD(c)    OLED_WriteCommand(c)\n");
-    s += QStringLiteral("#define ANIM_WRITE_DATA(d)   OLED_WriteData(d)\n\n");
+    /* 适配区按工程源码填（LibProbe 探出来的）；探不出来还是老默认值 */
+    s += LibProbe::adapterNote(adapter);
+    s += QStringLiteral("#define ANIM_WRITE_CMD(c)    %1\n").arg(adapter.writeCmd);
+    s += QStringLiteral("#define ANIM_WRITE_DATA(d)   %1\n\n").arg(adapter.writeData);
     s += QStringLiteral("/* 帧间延时：HAL_Delay(ms) / vTaskDelay(pdMS_TO_TICKS(ms)) / Delay_ms(ms) */\n");
-    s += QStringLiteral("#define ANIM_DELAY(ms)       HAL_Delay(ms)\n\n");
+    s += QStringLiteral("#define ANIM_DELAY(ms)       %1\n\n").arg(adapter.delayCall);
     s += QStringLiteral("/* 屏是 SH1106（显存 132 列，可见区从第 2 列开始）时是 2，SSD1306 是 0。\n");
     s += QStringLiteral("   这个值导出时按驱动源码自动判断后填好，一般不用改；\n");
     s += QStringLiteral("   判断错了（右边框缺两列、整幅左移 2 像素）就手改成 2。 */\n");
@@ -616,7 +619,8 @@ QString ImageGen::writeHeaderFile(const QString &path,
                                   const Options &opt,
                                   int delayMs,
                                   const QString &sourceName,
-                                  const QString &ident)
+                                  const QString &ident,
+                                  const LibProbe::CodeAdapter &adapter)
 {
     if (path.isEmpty())
     {
@@ -631,7 +635,7 @@ QString ImageGen::writeHeaderFile(const QString &path,
 
     QTextStream ts(&file);
     ts.setEncoding(QStringConverter::Utf8);
-    ts << renderHeader(frames, opt, delayMs, sourceName, ident);
+    ts << renderHeader(frames, opt, delayMs, sourceName, ident, adapter);
 
     /* 显式 close 再看错误：磁盘满这类问题在写的时候不报，落盘那一步才报 */
     file.close();
@@ -646,7 +650,8 @@ QString ImageGen::writeHeaderFile(const QString &path,
  *  多份素材打包进一个头文件（各自独立，不合成动画）
  * ========================================================================== */
 
-QString ImageGen::renderMultiHeader(const QVector<Asset> &assets, const QString &title)
+QString ImageGen::renderMultiHeader(const QVector<Asset> &assets, const QString &title,
+                                    const LibProbe::CodeAdapter &adapter)
 {
     /* 空帧的素材直接跳过：C 里没有"长度 0 的数组"，
      * 生成出来只会是一份编不过的文件，不如不写。 */
@@ -777,10 +782,12 @@ QString ImageGen::renderMultiHeader(const QVector<Asset> &assets, const QString 
     s += QStringLiteral(" *      void OLED_WriteCommand(uint8_t cmd);\n");
     s += QStringLiteral(" *      void OLED_WriteData(uint8_t dat);\n");
     s += QStringLiteral(" * ============================================================ */\n");
-    s += QStringLiteral("#define OLED_WRITE_CMD(c)    OLED_WriteCommand(c)\n");
-    s += QStringLiteral("#define OLED_WRITE_DATA(d)   OLED_WriteData(d)\n\n");
+    /* 适配区按工程源码填（LibProbe 探出来的）；探不出来还是老默认值 */
+    s += LibProbe::adapterNote(adapter);
+    s += QStringLiteral("#define OLED_WRITE_CMD(c)    %1\n").arg(adapter.writeCmd);
+    s += QStringLiteral("#define OLED_WRITE_DATA(d)   %1\n\n").arg(adapter.writeData);
     s += QStringLiteral("/* 帧间延时：HAL_Delay(ms) / vTaskDelay(pdMS_TO_TICKS(ms)) / Delay_ms(ms) */\n");
-    s += QStringLiteral("#define OLED_DELAY(ms)       HAL_Delay(ms)\n\n");
+    s += QStringLiteral("#define OLED_DELAY(ms)       %1\n\n").arg(adapter.delayCall);
     s += QStringLiteral("#if defined(__GNUC__)\n");
     s += QStringLiteral("#define OLED_UNUSED  __attribute__((unused))\n");
     s += QStringLiteral("#else\n");
@@ -893,7 +900,8 @@ QString ImageGen::renderMultiHeader(const QVector<Asset> &assets, const QString 
 
 QString ImageGen::writeMultiHeaderFile(const QString &path,
                                        const QVector<Asset> &assets,
-                                       const QString &title)
+                                       const QString &title,
+                                       const LibProbe::CodeAdapter &adapter)
 {
     if (path.isEmpty())
     {
@@ -902,7 +910,7 @@ QString ImageGen::writeMultiHeaderFile(const QString &path,
 
     /* 标题没给就用文件名：include guard 靠它区分不同的素材包 */
     const QString name = title.isEmpty() ? QFileInfo(path).fileName() : title;
-    const QString content = renderMultiHeader(assets, name);
+    const QString content = renderMultiHeader(assets, name, adapter);
     if (content.isEmpty())
     {
         return QStringLiteral("没有可导出的素材（每份素材都至少要有 1 帧）");

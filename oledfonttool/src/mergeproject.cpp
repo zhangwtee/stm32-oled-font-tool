@@ -1730,4 +1730,253 @@ int firstOverflowIndex(const QString &text, int glyphW, int screenW)
 	return -1;
 }
 
+/* ============================================================================
+ *  适配区体检 / 改写
+ *
+ *  一键接入只做三件事：补声明、补 include、插示例。适配区那四行宏不在
+ *  其中 —— 而能不能编过恰恰取决于它们：标准库工程里没有 HAL_Delay，
+ *  正点原子那套驱动里也没有 OLED_WriteCommand。
+ *
+ *  接入的时候顺手对一遍，不一致就改。判据是工程源码探测出来的结果
+ *  （LibProbe），没探出来就一个字节都不动。
+ * ========================================================================== */
+
+namespace
+{
+
+enum AdapterSlotKind
+{
+	SlotCmd = 0,
+	SlotData,
+	SlotAscii,
+	SlotDelay
+};
+
+struct AdapterSlot
+{
+	const char *sig;    /* "#define " 后面那段固定部分 */
+	int         kind;
+};
+
+/* 字库用 CF_*，素材包用 OLED_* / ANIM_*。两套都认：用户重新导出哪个都能修 */
+const AdapterSlot kAdapterSlots[] = {
+	{ "CF_WRITE_CMD(c)",              SlotCmd   },
+	{ "CF_WRITE_DATA(d)",             SlotData  },
+	{ "CF_SHOW_ASCII(line, col, ch)", SlotAscii },
+	{ "OLED_WRITE_CMD(c)",            SlotCmd   },
+	{ "OLED_WRITE_DATA(d)",           SlotData  },
+	{ "ANIM_WRITE_CMD(c)",            SlotCmd   },
+	{ "ANIM_WRITE_DATA(d)",           SlotData  },
+	{ "ANIM_DELAY(ms)",               SlotDelay },
+	{ "OLED_DELAY(ms)",               SlotDelay }
+};
+
+QString slotValue(int kind, const LibProbe::CodeAdapter &a)
+{
+	switch (kind)
+	{
+	case SlotCmd:   return a.writeCmd;
+	case SlotData:  return a.writeData;
+	case SlotAscii: return a.showAscii;
+	default:        return a.delayCall;
+	}
+}
+
+bool readRawBytes(const QString &path, QByteArray *raw)
+{
+	QFile f(path);
+	if (!f.open(QIODevice::ReadOnly))
+	{
+		return false;
+	}
+	*raw = f.readAll();
+	return true;
+}
+
+struct AdapterDiff
+{
+	int     line = 0;       /* 0 基行号 */
+	QString sig;            /* 宏名，给提示用 */
+	QString oldValue;
+	QString newValue;
+};
+
+/* 适配区全是 ASCII，按 Latin-1 转成 QString 处理再写回：一个字节对一字符，
+ * UTF-8 / GBK / 有没有 BOM 都原样保留，不会被这次改写带跑。 */
+QVector<AdapterDiff> collectDiffs(const QStringList &lines, const LibProbe::CodeAdapter &a)
+{
+	QVector<AdapterDiff> out;
+	for (int i = 0; i < lines.size(); ++i)
+	{
+		QString line = lines.at(i);
+		if (line.endsWith(QLatin1Char('\r')))
+		{
+			line.chop(1);
+		}
+		const QString t = line.trimmed();
+		if (!t.startsWith(QLatin1String("#define ")))
+		{
+			continue;
+		}
+
+		for (const AdapterSlot &s : kAdapterSlots)
+		{
+			const QString sig = QLatin1String("#define ") + QLatin1String(s.sig);
+			if (!t.startsWith(sig))
+			{
+				continue;
+			}
+			/* 后面得跟空白或者到头，否则更长的名字（CF_WRITE_CMD(c2)）也会被配上 */
+			if (t.size() > sig.size() && !t.at(sig.size()).isSpace())
+			{
+				continue;
+			}
+
+			const QString oldV = t.mid(sig.size()).trimmed();
+			const QString newV = slotValue(s.kind, a);
+			if (oldV == newV)
+			{
+				break;
+			}
+
+			AdapterDiff d;
+			d.line     = i;
+			d.sig      = QString::fromLatin1(s.sig);
+			d.oldValue = oldV;
+			d.newValue = newV;
+			out.append(d);
+			break;
+		}
+	}
+	return out;
+}
+
+}   // namespace
+
+QStringList adapterMismatch(const QString &headerPath, const LibProbe::CodeAdapter &adapter)
+{
+	QStringList out;
+	if (headerPath.isEmpty() || !adapter.detected)
+	{
+		return out;
+	}
+
+	QByteArray raw;
+	if (!readRawBytes(headerPath, &raw) || raw.isEmpty())
+	{
+		return out;
+	}
+
+	const QStringList lines = QString::fromLatin1(raw).split(QLatin1Char('\n'));
+	for (const AdapterDiff &d : collectDiffs(lines, adapter))
+	{
+		out << QStringLiteral("第 %1 行  %2\n    现在是 %3\n    应该是 %4")
+		       .arg(d.line + 1)
+		       .arg(d.sig, d.oldValue, d.newValue);
+	}
+	return out;
+}
+
+int applyAdapter(const QString &headerPath, const LibProbe::CodeAdapter &adapter,
+                 bool *backedUp, QString *err)
+{
+	if (backedUp)
+	{
+		*backedUp = false;
+	}
+	if (err)
+	{
+		err->clear();
+	}
+	if (headerPath.isEmpty() || !adapter.detected)
+	{
+		return 0;
+	}
+
+	QByteArray raw;
+	if (!readRawBytes(headerPath, &raw))
+	{
+		if (err)
+		{
+			*err = QStringLiteral("读不了 %1").arg(headerPath);
+		}
+		return 0;
+	}
+
+	QStringList lines = QString::fromLatin1(raw).split(QLatin1Char('\n'));
+	const QVector<AdapterDiff> diffs = collectDiffs(lines, adapter);
+	if (diffs.isEmpty())
+	{
+		return 0;
+	}
+
+	for (const AdapterDiff &d : diffs)
+	{
+		QString line = lines.at(d.line);
+		const bool crlf = line.endsWith(QLatin1Char('\r'));
+		if (crlf)
+		{
+			line.chop(1);
+		}
+
+		const int hash = line.indexOf(QLatin1String("#define"));
+		if (hash < 0)
+		{
+			continue;
+		}
+		const int close = line.indexOf(QLatin1Char(')'), hash);
+		if (close < 0)
+		{
+			continue;
+		}
+
+		int vs = close + 1;             /* 值的起点，前面的对齐空格保留 */
+		while (vs < line.size() && line.at(vs).isSpace())
+		{
+			++vs;
+		}
+
+		lines[d.line] = line.left(vs) + d.newValue
+		                + (crlf ? QStringLiteral("\r") : QString());
+	}
+
+	/* 备份：apply() 可能已经备份过，那就沿用 —— 撤销一次回到接入前的状态 */
+	const QString bak = headerPath + QStringLiteral(".oledbak");
+	if (!QFile::exists(bak))
+	{
+		if (!QFile::copy(headerPath, bak))
+		{
+			if (err)
+			{
+				*err = QStringLiteral("备份失败，没敢动这个文件：%1").arg(bak);
+			}
+			return 0;
+		}
+		if (backedUp)
+		{
+			*backedUp = true;
+		}
+	}
+
+	QSaveFile out(headerPath);
+	if (!out.open(QIODevice::WriteOnly))
+	{
+		if (err)
+		{
+			*err = out.errorString();
+		}
+		return 0;
+	}
+	out.write(lines.join(QLatin1Char('\n')).toLatin1());
+	if (!out.commit())
+	{
+		if (err)
+		{
+			*err = out.errorString();
+		}
+		return 0;
+	}
+	return diffs.size();
+}
+
 }   // namespace MergeProject

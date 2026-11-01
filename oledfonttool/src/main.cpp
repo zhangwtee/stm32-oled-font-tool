@@ -760,6 +760,11 @@ private:
 	int  currentColOffset() const;
 	int  currentScreenH() const;
 
+	/* 适配区填什么：按工程源码认一遍（标准库 / HAL、延时函数、写命令写法）。
+	 * hintPath 是导出目标文件，用来在没有字库路径时反推工程根。
+	 * 认不出来返回全默认值，导出的文件和老版本逐字节相同。 */
+	LibProbe::CodeAdapter currentAdapter(const QString &hintPath = QString());
+
 	/* ---- 芯片 Flash 容量 ---- */
 	/* 从工程的 .uvprojx（IROM）或链接脚本读容量，读不到退回型号解码。
 	 * 放启动和换工程时做，状态栏和图片页的占比都靠它。 */
@@ -798,6 +803,12 @@ private:
 	QComboBox          *m_screenHBox;      /* 屏高 64 / 32，写进字库的 CF_SCREEN_H */
 	ScreenProbe::Result m_probe;
 	bool                m_probeDone = false;
+
+	/* 适配区探测结果，按工程根缓存 —— 同一个工程只扫一遍目录，
+	 * 导出时不用每次都重新读几千个文件。 */
+	LibProbe::CodeAdapter m_adapter;
+	QString               m_adapterRoot;
+	bool                  m_adapterDone = false;
 
 	/* 芯片 Flash 容量。以前写死 64KB，打开 512KB 的工程就在说假话。
 	 * m_chip 是自动读到的结果，m_flashBox 让用户能覆盖它（同一个芯片也可以
@@ -2303,7 +2314,7 @@ void MainWindow::exportAnimHeader()
 	const QString err = ImageGen::writeHeaderFile(
 		path, a->packed, a->opt, effectiveDelayMs(),
 		a->sourceName.isEmpty() ? QStringLiteral("未记录") : a->sourceName,
-		a->name);
+		a->name, currentAdapter(path));
 	if (!err.isEmpty())
 	{
 		QMessageBox::critical(this, QStringLiteral("写不进去"),
@@ -2386,7 +2397,7 @@ void MainWindow::exportAllAssets()
 			targets.at(i), a.packed, a.opt,
 			qMax(1, a.delayMs) * qMax(1, a.step),
 			a.sourceName.isEmpty() ? QStringLiteral("未记录") : a.sourceName,
-			a.name);
+			a.name, currentAdapter(targets.at(i)));
 		if (!err.isEmpty())
 		{
 			errors << QStringLiteral("%1：%2").arg(a.name + QStringLiteral(".h"), err);
@@ -2463,7 +2474,8 @@ void MainWindow::exportAssetsToSingleFile()
 		return;
 	}
 
-	const QString err = ImageGen::writeMultiHeaderFile(path, list, QFileInfo(path).fileName());
+	const QString err = ImageGen::writeMultiHeaderFile(path, list, QFileInfo(path).fileName(),
+	                                                   currentAdapter(path));
 	if (!err.isEmpty())
 	{
 		QMessageBox::critical(this, QStringLiteral("写不进去"),
@@ -3009,13 +3021,38 @@ void MainWindow::mergeIntoProject(bool assets)
 			return;
 		}
 
+		/* 适配区顺手改对。接入只补声明和 include，可编不编得过还看适配区
+		 * 那四行宏 —— 标准库工程里没有 HAL_Delay，正点原子那套驱动里
+		 * 也没有 OLED_WriteCommand，接完照样报「未定义的标识符」。
+		 * 探测不到工程底子就一个字节都不动。 */
+		bool    adapterBak = false;
+		QString adapterErr;
+		const LibProbe::CodeAdapter adapter = currentAdapter(scan.fontHeader);
+		const int adapterFixed = MergeProject::applyAdapter(
+			scan.fontHeader, adapter, &adapterBak, &adapterErr);
+
+		QString extra;
+		if (adapterFixed > 0)
+		{
+			extra = QStringLiteral("\n\n适配区按工程源码改了 %1 行（%2）%3。")
+			            .arg(adapterFixed)
+			            .arg(adapter.origin)
+			            .arg(adapterBak ? QStringLiteral("，原文件备份成 .oledbak")
+			                            : QString());
+		}
+		else if (!adapterErr.isEmpty())
+		{
+			extra = QStringLiteral("\n\n适配区没动：%1").arg(adapterErr);
+		}
+
 		QMessageBox::information(
 			&dlg, QStringLiteral("接好了"),
 			QStringLiteral("改了 %1 个文件：\n\n%2\n\n"
 			               "接下来在 Keil 里 Rebuild 就行。\n"
-			               "要退回去就点「撤销上次接入」。")
+			               "要退回去就点「撤销上次接入」。%3")
 				.arg(touched.size())
-				.arg(QDir::toNativeSeparators(touched.join(QLatin1Char('\n')))));
+				.arg(QDir::toNativeSeparators(touched.join(QLatin1Char('\n'))))
+				.arg(extra));
 		rescan();
 	});
 
@@ -3476,6 +3513,63 @@ int MainWindow::currentScreenH() const
 	return (h == 32) ? 32 : 64;
 }
 
+/* 适配区四个宏填什么。
+ *
+ * 这件事以前是写死的默认值（HAL_Delay + OLED_WriteCommand）。标准库工程
+ * 里没有 HAL_Delay，正点原子那套驱动里没有 OLED_WriteCommand —— 导出的
+ * 文件看着没问题，Keil 一编译就报「未定义的标识符」，指不到取模工具头上。
+ *
+ * 现在导出前先认一眼工程：标准库还是 HAL、延时函数叫什么、写命令是
+ * 两个函数还是一个函数加标志位。认出来就填对的，认不出来还是老默认值，
+ * 并在文件里写明「这是默认值，请自己核对」。
+ *
+ * 结果按工程根缓存：同一工程只扫一遍目录。 */
+LibProbe::CodeAdapter MainWindow::currentAdapter(const QString &hintPath)
+{
+	QString root = findProjectRoot(m_headerPath);
+	if (root.isEmpty())
+	{
+		root = findProjectRoot(hintPath);
+	}
+	if (root.isEmpty())
+	{
+		return LibProbe::CodeAdapter();
+	}
+
+	if (m_adapterDone && root == m_adapterRoot)
+	{
+		return m_adapter;
+	}
+
+	/* 字库不一定正好放在工程根下面一层（有人会建 Hardware/Fonts/）。
+	 * 往上再退两级试试：找到第一层能认出来的就算数。
+	 * 都不行就返回默认值 —— 不猜。 */
+	QString dir = root;
+	for (int up = 0; up < 3 && !dir.isEmpty(); ++up)
+	{
+		const LibProbe::Result r = LibProbe::probe(dir);
+		if (r.any())
+		{
+			m_adapter     = LibProbe::adapterOf(r);
+			m_adapterRoot = root;
+			m_adapterDone = true;
+			return m_adapter;
+		}
+
+		QDir d(dir);
+		if (!d.cdUp())
+		{
+			break;
+		}
+		dir = d.absolutePath();
+	}
+
+	m_adapter     = LibProbe::CodeAdapter();
+	m_adapterRoot = root;
+	m_adapterDone = true;
+	return m_adapter;
+}
+
 /*
  * 副标题跟着「取反」开关走。
  *
@@ -3591,6 +3685,7 @@ void MainWindow::readChip()
 void MainWindow::refreshProjectFacts()
 {
 	m_probeDone = false;
+	m_adapterDone = false;          /* 换工程了，适配区也要重新认 */
 	reprobeScreen();
 	readChip();
 	updateStatus();
@@ -3652,48 +3747,11 @@ void MainWindow::exportHeader(bool askForPath)
 	}
 
 	const QString content = m_gen.generateHeader(srcText, &err, currentColOffset(),
-	                                              currentScreenH());
-
-	/* 诊断：每次导出都把中间结果落盘。
-	 * 生成失败时靠猜没有意义，直接留下证据（文字、生成内容、逐行统计）。 */
-	{
-		const QString diagPath = QDir(QCoreApplication::applicationDirPath())
-			.absoluteFilePath(QStringLiteral("export-debug.txt"));
-		QFile dbg(diagPath);
-		if (dbg.open(QIODevice::WriteOnly | QIODevice::Text))
-		{
-			QTextStream ts(&dbg);
-			ts.setEncoding(QStringConverter::Utf8);
-			ts << "=== 输入文字 ===\n";
-			ts << "字符数: " << srcText.size() << "\n";
-			ts << "内容: [" << srcText << "]\n\n";
-			ts << "=== 汉字统计 ===\n";
-			ts << "FontGen::glyphCount: " << FontGen::glyphCount(srcText) << "\n";
-			ts << "content 是否为空: " << (content.isEmpty() ? "是" : "否") << "\n";
-			ts << "content 长度: " << content.size() << "\n\n";
-			ts << "=== 生成内容逐行统计 ===\n";
-
-			const QStringList lines = content.split(QLatin1Char('\n'));
-			ts << "总行数: " << lines.size() << "\n";
-			for (int i = 0; i < lines.size(); ++i)
-			{
-				const QString tr = lines.at(i).trimmed();
-				ts << QStringLiteral("[%1] 前6字符=<%2> 以0x开头=%3 长度=%4\n")
-					.arg(i)
-					.arg(tr.left(6))
-					.arg(tr.startsWith(QLatin1String("0x")) ? "是" : "否")
-					.arg(tr.size());
-			}
-			ts << "\n=== 原始内容(前 2000 字符) ===\n";
-			ts << content.left(2000) << "\n";
-			dbg.close();
-		}
-	}
+	                                              currentScreenH(), currentAdapter());
 
 	if (content.isEmpty())
 	{
-		QMessageBox::warning(this, QStringLiteral("无法导出"),
-			err + QStringLiteral("\n\n(诊断信息已写入 export-debug.txt)"));
+		QMessageBox::warning(this, QStringLiteral("无法导出"), err);
 		return;
 	}
 
@@ -3761,7 +3819,7 @@ void MainWindow::exportHeader(bool askForPath)
 			QMessageBox::critical(this, QStringLiteral("导出前自检失败"),
 				QStringLiteral("没有生成任何字模数据行。\n"
 				               "当前文字里似乎没有汉字（只有 ASCII 字符？）\n\n"
-				               "诊断信息已写入程序目录下的 export-debug.txt，请把它发给我。"));
+				               "ASCII 字符走驱动自带的 8×16 字库，不需要取模。"));
 			return;
 		}
 	}
