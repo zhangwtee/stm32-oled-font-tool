@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright (c) 2026 zhangwtee <https://github.com/zhangwtee>
+// 本文件属于「OLED 点阵取模工具」。改动请保留以上两行并注明改了什么（Apache-2.0 §4b）。
 /* 把导出的三份头文件真的编一遍。
  * 字符串对的、宏对的，都不代表能编译 —— 注释里嵌了块注释结束符、
  * 或者少个分号这种事，只有编译器和链接器说了算。

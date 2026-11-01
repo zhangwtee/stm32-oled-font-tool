@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright (c) 2026 zhangwtee <https://github.com/zhangwtee>
+// 本文件属于「OLED 点阵取模工具」。改动请保留以上两行并注明改了什么（Apache-2.0 §4b）。
 /*==============================================================================
  *  main.cpp  ——  图形界面主程序：界面布局、导出、工程接入入口
  *
@@ -65,6 +68,7 @@
 #include "mergeproject.h"
 #include "screenprobe.h"
 #include "selftest.h"
+#include "omxbuild.h"     /* CMake 生成：构建指纹 */
 
 /* 诊断用：读进程令牌，判断是否被 AppContainer / 低完整性限制 */
 #ifdef Q_OS_WIN
@@ -4337,6 +4341,19 @@ int main(int argc, char *argv[])
 	 * 「工程目录」读不到了。不做旧键迁移：这个键在本机从来没写进去过
 	 * （见上），迁移代码只会是永远走不到的死分支。 */
 	app.setApplicationName(QStringLiteral("OLED 点阵取模工具"));
+
+	/* 构建标记：不显示、不写盘，只作为属性挂在 QApplication 上。
+	 *
+	 * 目的很窄：让这行字留在 exe 的只读数据里。日后手边出现一个来路不明的
+	 * oledmatrix.exe，查一下就能对上「哪次提交、哪天编的」；对不上就是被
+	 * 重新编过的。
+	 *
+	 * 特意用 char[] 而不是 QStringLiteral：后者在 Windows 上编成 UTF-16，
+	 * 每字符夹两个字节，普通的 strings 只扫 8 位，扫不出来。纯 ASCII 才
+	 * 是一搜就有。这也是唯一一处会把构建信息带进二进制的地方，别删。 */
+	static const char kBuildStamp[] =
+	        "zhangwtee/oledmatrix " OMX_GIT_COMMIT " " OMX_BUILD_DATE;
+	app.setProperty("oledmatrix.build", QString::fromLatin1(kBuildStamp));
 
 	/* 强制用 Fusion 风格 + 浅色调色板。
 	 *

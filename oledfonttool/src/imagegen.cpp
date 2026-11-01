@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright (c) 2026 zhangwtee <https://github.com/zhangwtee>
+// 本文件属于「OLED 点阵取模工具」。改动请保留以上两行并注明改了什么（Apache-2.0 §4b）。
 /*==============================================================================
  *  imagegen.cpp  ——  图片 / 动画二值化成点阵并导出
  *
@@ -6,6 +9,8 @@
  *  Gitee  https://gitee.com/z_w_t
  *==============================================================================*/
 #include "imagegen.h"
+
+#include "watermark.h"
 
 #include <QCollator>
 #include <QFile>
@@ -469,6 +474,8 @@ QString ImageGen::renderHeader(const QVector<QVector<quint8>> &frames,
                                       : QStringLiteral("uint8_t");
 
     QString s;
+    /* 出处标记：单帧 / 动图导出都走这里 */
+    s += Watermark::text();
     s += QStringLiteral("/* ============================================================\n");
     s += QStringLiteral(" *  %1\n").arg(
         count > 1 ? QStringLiteral("点阵动画数据 + 显示函数")
@@ -710,6 +717,8 @@ QString ImageGen::renderMultiHeader(const QVector<Asset> &assets, const QString 
     QString s;
 
     /* ---------------- 文件抬头 ---------------- */
+    /* 出处标记排在最前面，和字库导出保持一致 */
+    s += Watermark::text();
     s += QStringLiteral("/* ============================================================\n");
     s += QStringLiteral(" *  OLED 点阵素材包：%1 份素材，各存各的\n").arg(list.size());
     s += QStringLiteral(" *\n");

@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright (c) 2026 zhangwtee <https://github.com/zhangwtee>
+// 本文件属于「OLED 点阵取模工具」。改动请保留以上两行并注明改了什么（Apache-2.0 §4b）。
 /* MergeProject（一键接入）的回归测试。
  *
  * 这个模块会真的改用户工程里的文件，所以重点不在"功能对不对"，

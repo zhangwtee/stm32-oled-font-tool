@@ -73,7 +73,8 @@ oledfonttool\
     verify_cfont.py        校验字库是否逐字节一致
     dump_font.py           把字节还原成点阵图
     install-cfont.cmd      把字库搬进工程（带备份）
-    OLED_CFont.h           命令行版的产物
+    examples\
+      anim_play_demo.c     动图播放示例：三种场景，改 DEMO_MODE 选一个（不参与编译）
     pctest\                PC 上跑 OLED 驱动的测试台
       stm32f10x.h           桩头文件（别加进 Keil 工程）
       test_oled.c           I2C 从机模拟器，还原显存成图
@@ -138,7 +139,7 @@ CHARS = (
 python oledfonttool\src\build_cfont.py      # 生成字库，并打印每个字的点阵供核对
 ```
 
-产出 `src\OLED_CFont.h`，再双击 `src\install-cfont.cmd` 搬运。
+产出 `src\OLED_CFont.h`（生成物，不进仓库），再双击 `src\install-cfont.cmd` 搬运。
 
 只想**再加几个字**、不想重建整份字库，用 `add_chars.py`：
 
@@ -325,6 +326,142 @@ static const uint8_t Anim_Map[ANIM_COUNT]  = { 0,1,2,2,2,3, ... };
 
 没有重复帧时不生成 `ANIM_DATA_COUNT` 和 `Anim_Map`，输出和以前完全一样，
 老工程重新导出不会被搅动。
+
+### 在工程里播放：完整例子
+
+前面给的都是片段。这里把三件事讲全：**调哪个函数、代码放在哪、主循环里还有别的事怎么办**。
+
+仓库里另有一份可以整段抄的骨架：`oledfonttool/examples/anim_play_demo.c`，
+改开头一个 `DEMO_MODE` 就能在下面三种场景之间切换。
+
+**先认清三个名字**（以 `logo` 这份素材为例，换成你的素材名即可）：
+
+| 名字 | 是什么 |
+|---|---|
+| `Logo_ShowFrame(i)` | 把第 `i` 帧整屏刷上去（自己发定位命令，不依赖 `OLED_SetCursor`） |
+| `LOGO_COUNT` | 逻辑帧数。循环范围是 `0` 到 `LOGO_COUNT - 1` |
+| `LOGO_DELAY_MS` | 帧间隔（毫秒），**导出时定的**，回来改数字下次导出会被覆盖 |
+
+导出的文件里如果还有 `LOGO_DATA_COUNT`，那是重复帧合并后**实际存了几帧**。
+播放一律用 `LOGO_COUNT`；用成 `DATA_COUNT` 动画会变快。
+
+**场景一：屏上只放这一段动画**
+
+```c
+#include "OLED.h"
+#include "logo.h"        /* 整个工程只在这一个 .c 里 include */
+
+int main(void)
+{
+    OLED_Init();
+
+    while (1)
+    {
+        uint16_t i;
+        for (i = 0; i < LOGO_COUNT; i++)
+        {
+            Logo_ShowFrame(i);
+            LOGO_DELAY(LOGO_DELAY_MS);
+        }
+    }
+}
+```
+
+**场景二：主循环里还有按键、传感器要做 —— 别用上面那个循环**
+
+`LOGO_DELAY()` 是死等。128×64 刷一帧本身就要发 1024 个字节、几毫秒，再死等 80ms，
+这 80ms 里按键扫描一次都轮不到 —— 按下去没反应，还以为是按键坏了。改成「到点才刷」：
+
+```c
+static uint16_t s_frame;
+static uint32_t s_last;
+
+int main(void)
+{
+    OLED_Init();
+    s_last = millis_now();          /* 换成本工程现成的毫秒计时，见下 */
+
+    while (1)
+    {
+        Key_Scan();                 /* 你自己的活照旧干 */
+        Sensor_Poll();
+
+        uint32_t now = millis_now();
+        if (now - s_last >= LOGO_DELAY_MS)
+        {
+            s_last  = now;
+            Logo_ShowFrame(s_frame);
+            s_frame = (s_frame + 1) % LOGO_COUNT;
+        }
+    }
+}
+```
+
+`millis_now()` 换成本工程现成的那个：HAL 库是 `HAL_GetTick()`；标准库一般是
+`SysTick` 中断里累加的变量（中景园 `delay.c` 的 `now_time`、正点原子 `delay.c` 的
+`g_sys_run_time`），`extern` 一下就能用。
+
+实际帧率会比设的值略低（刷一帧的耗时也算在里面），对动画无所谓；真要卡准，
+把间隔改成 `LOGO_DELAY_MS - 刷一帧的耗时`，不要去动延时函数。
+
+**场景三：几张图按条件切换**（旋转编码器一转换一张、按键翻页、超阈值报警）
+
+打包导出的 `oled_assets.h` 里每份素材的显示函数签名完全一样，所以可以做成表按下标调，
+不用写一长串 `if / else`：
+
+```c
+#include "oled_assets.h"
+
+typedef void (*ShowFn)(uint16_t);
+
+static const ShowFn   kShow[]  = { Img_3_ShowFrame, Miao1_ShowFrame, Xiantiaoxiaogou1_ShowFrame };
+static const uint16_t kCount[] = { IMG_3_COUNT,     MIAO1_COUNT,     XIANTIAOXIAOGOU1_COUNT };
+static const uint16_t kDelay[] = { IMG_3_DELAY_MS,  MIAO1_DELAY_MS,  XIANTIAOXIAOGOU1_DELAY_MS };
+
+#define PIC_NUM   ((uint8_t)(sizeof(kShow) / sizeof(kShow[0])))
+
+static uint8_t  s_idx;
+static uint16_t s_frame;
+static uint32_t s_last;
+
+int main(void)
+{
+    OLED_Init();
+    s_last = millis_now();
+
+    while (1)
+    {
+        if (Encoder_Get() != 0)                     /* 换成你的触发条件 */
+        {
+            s_idx   = (s_idx + 1) % PIC_NUM;        /* 换下一张 */
+            s_frame = 0;                            /* 从第 0 帧重新开始 */
+            s_last  = 0;                            /* 下一轮立刻刷，不用等间隔 */
+        }
+
+        uint32_t now = millis_now();
+        if (now - s_last >= kDelay[s_idx])
+        {
+            s_last  = now;
+            kShow[s_idx](s_frame);                          /* 调当前这张 */
+            s_frame = (s_frame + 1) % kCount[s_idx];        /* 放完循环 */
+        }
+    }
+}
+```
+
+`s_frame` 一定要在换图时清 0：不清的话，从 21 帧的图切到 3 帧的图会从第 3 帧之后开始，
+看着像「缺了几帧」。
+
+**对不上时按现象查**
+
+| 现象 | 多半是 |
+|---|---|
+| 编译报 `Logo_ShowFrame` 未定义 | 头文件没 include，或者在另一个 `.c` 里 include 了 |
+| 链接报 `Anim_Frames` 重复定义 | 头文件被多个 `.c` include 了 —— 数组不是 `static`，只能一处 |
+| 花屏、整幅歪、右边缺两列 | 【适配区】的写命令/写数据指错了；SH1106 屏要 `ANIM_COL_OFFSET = 2` |
+| 只亮上半屏 | 导出的目标尺寸选大了（屏是 128×32 却导 128×64） |
+| 按键没反应、程序像卡住 | 用了场景一的死等循环，换场景二的写法 |
+| 动画比设的快一截 | 播放循环用了 `*_DATA_COUNT`，应该用 `*_COUNT` |
 
 ## 字体：为什么有些字体取出来是糊的
 
@@ -807,3 +944,32 @@ gcc -std=c99 -O1 -Wall -Wextra -I. `
 ```
 
 `stm32f10x.h` 是给 PC 编译用的桩头文件（替代 STM32 标准库），**不要加进 Keil 工程**。
+
+## 许可证
+
+**Apache License 2.0**，全文见 [LICENSE](LICENSE)，第三方组件声明见 [NOTICE](NOTICE)。
+
+说人话版：
+
+| | |
+|---|---|
+| **可以** | 任何人免费使用、修改、塞进自己的工程、商用、闭源分发，都不用问过作者 |
+| **必须** | 分发时保留版权声明和许可证文本；改动过的文件要注明改过 |
+| **不可以** | 用本项目的名字或作者名义给自己的版本做背书 —— Apache-2.0 第 6 条明确不授予商标权 |
+
+**导出的字模、点阵、素材包不算程序，是数据**，不受上面这些限制。拿去做毕设、
+做产品、闭源卖都行，不要求你的工程跟着开源。只有一个小请求（不是法律要求）：
+导出文件开头那行出处说明留着。字模扩散得越远，越没人记得它是从哪来的。
+
+### 为什么不是 MIT
+
+MIT 只要求保留版权声明，别的什么都不管 —— 包括允许别人改了之后闭源、换皮、
+甚至挂上自己的名字卖。本项目要的是"谁都能用，但别装作是自己写的"，所以选了
+Apache-2.0：比 MIT 多了"不得使用项目名称和作者名义做背书"这一条。
+
+### Qt
+
+本项目用 Qt 6，按 **LGPLv3** 使用。发布的 zip 里的 Qt DLL 是未修改的原版，
+你可以换成自己编译的同版本库，程序不会因此拒绝运行。Qt 源码在
+<https://download.qt.io/>。再分发本软件时，`NOTICE` 里那段关于 Qt 的说明
+请一并带上 —— 这是 LGPLv3 的义务。

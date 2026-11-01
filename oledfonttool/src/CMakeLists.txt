@@ -24,6 +24,28 @@ endif()
 
 find_package(Qt6 REQUIRED COMPONENTS Widgets)
 
+# ---- 构建指纹 ----
+# 把「配置时的提交号」和「配置日期」编进 exe。界面上不显示、也不写盘，
+# 只留在这份二进制里，用来回答一个很实际的问题：手里这个 oledmatrix.exe
+# 到底是哪次提交、什么时候编出来的。
+#
+# 课堂目录那份源码没有 .git，git 会一路往上找不到仓库；取不到就写 local，
+# 编译照常。想刷新这个值，重新跑一次 cmake 配置即可。
+set(OMX_GIT_COMMIT "local")
+execute_process(
+    COMMAND git rev-parse --short HEAD
+    WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
+    OUTPUT_VARIABLE _omx_commit
+    OUTPUT_STRIP_TRAILING_WHITESPACE
+    RESULT_VARIABLE _omx_rc
+    ERROR_QUIET)
+if(_omx_rc EQUAL 0 AND _omx_commit)
+    set(OMX_GIT_COMMIT "${_omx_commit}")
+endif()
+string(TIMESTAMP OMX_BUILD_DATE "%Y-%m-%d")
+message(STATUS "build stamp: ${OMX_GIT_COMMIT} ${OMX_BUILD_DATE}")
+configure_file(omxbuild.h.in ${CMAKE_CURRENT_BINARY_DIR}/omxbuild.h @ONLY)
+
 qt_add_executable(oledmatrix
     main.cpp
     fontgen.cpp
@@ -43,6 +65,9 @@ set_source_files_properties(app.ico PROPERTIES HEADER_FILE_ONLY TRUE)
 target_sources(oledmatrix PRIVATE app.ico)
 
 target_link_libraries(oledmatrix PRIVATE Qt6::Widgets)
+
+# omxbuild.h 是 configure_file 生成到构建目录的，不是源码目录
+target_include_directories(oledmatrix PRIVATE ${CMAKE_CURRENT_BINARY_DIR})
 
 # Windows 下不弹控制台窗口
 set_target_properties(oledmatrix PROPERTIES

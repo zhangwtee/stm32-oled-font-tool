@@ -1,4 +1,7 @@
+# SPDX-License-Identifier: Apache-2.0
 # -*- coding: utf-8 -*-
+# Copyright (c) 2026 zhangwtee <https://github.com/zhangwtee>
+# 本文件属于「OLED 点阵取模工具」。改动请保留以上两行并注明改了什么（Apache-2.0 §4b）。
 """生成 OLED_CFont.h —— 汉字字模表（字号由 gen_oled_hz.SIZE 决定，默认 16x16）
 
 改字方法：把 CHARS 改成你要显示的文字，重新运行本脚本。

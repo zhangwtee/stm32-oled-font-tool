@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright (c) 2026 zhangwtee <https://github.com/zhangwtee>
+// 本文件属于「OLED 点阵取模工具」。改动请保留以上两行并注明改了什么（Apache-2.0 §4b）。
 /*==============================================================================
  *  mergeproject.cpp  ——  一键接入工程：把字库用法写进用户工程
  *
@@ -1597,7 +1600,9 @@ bool detectAssets(const QString &assetsHeaderPath, const QString &showFunc, Scan
 			s.detail = QStringLiteral("加在 %1(); 之后（第 %2 行后）。\n"
 			                          "只刷一帧，用来确认接线和图都对。\n"
 			                          "要播动画，把这一行换成在 while(1) 里按节奏调 "
-			                          "%3(i)（i 从 0 到帧数-1）。")
+			                          "%3(i)（i 从 0 到帧数-1）；主循环里还有按键、"
+			                          "传感器要做的话别用死等，改成「到点刷一帧」，"
+			                          "否则等待期间按什么都没反应。")
 			                   .arg(initName).arg(initLn).arg(showFunc);
 			out->steps << s;
 		}

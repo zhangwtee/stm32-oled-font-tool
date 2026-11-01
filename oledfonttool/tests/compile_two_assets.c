@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright (c) 2026 zhangwtee <https://github.com/zhangwtee>
+// 本文件属于「OLED 点阵取模工具」。改动请保留以上两行并注明改了什么（Apache-2.0 §4b）。
 /* 两份素材的头文件放进同一个翻译单元 —— 「分开存放」真正要成立的场景。
  *
  * 改动前两份都叫 ANIM_WIDTH / Anim_Frames / Anim_ShowFrame，include guard

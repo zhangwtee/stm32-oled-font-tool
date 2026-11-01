@@ -99,6 +99,10 @@ venv/
 # ---- 本工具的临时产物 --------------------------------------------------
 # 安装脚本搬运前留的旧文件备份
 *.old.h
+# build_cfont.py / add_chars.py 写出的汉字字模表：
+# 它是产物不是源码（70 个字 = 21KB 十六进制），而且会随脚本里的 CHARS 变，
+# 留在仓库里只会慢慢变旧。要看示例字库跑一次脚本就有了。
+oledfonttool/src/OLED_CFont.h
 # 导出失败时生成的诊断文件
 export-debug.txt
 build-log.txt

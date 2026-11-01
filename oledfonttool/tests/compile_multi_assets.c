@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright (c) 2026 zhangwtee <https://github.com/zhangwtee>
+// 本文件属于「OLED 点阵取模工具」。改动请保留以上两行并注明改了什么（Apache-2.0 §4b）。
 /* 多份素材写进**一个** .h，但各存各的 —— 编译级验收。
  *
  * 这是「全部存进一个 .h…」那个按钮的成品：fixture/assets_pack.h 由

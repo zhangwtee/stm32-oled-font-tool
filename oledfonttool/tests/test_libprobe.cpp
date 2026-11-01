@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright (c) 2026 zhangwtee <https://github.com/zhangwtee>
+// 本文件属于「OLED 点阵取模工具」。改动请保留以上两行并注明改了什么（Apache-2.0 §4b）。
 /* LibProbe（工程底子探测）+ 适配区改写的测试。
  *
  * 这一块的错法很隐蔽：探错了不会崩，只会让导出的头文件在用户机器上

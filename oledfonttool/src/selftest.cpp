@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright (c) 2026 zhangwtee <https://github.com/zhangwtee>
+// 本文件属于「OLED 点阵取模工具」。改动请保留以上两行并注明改了什么（Apache-2.0 §4b）。
 /*==============================================================================
  *  selftest.cpp  ——  自检帧生成
  *
@@ -9,6 +12,7 @@
 
 #include "fontgen.h"
 #include "imagegen.h"
+#include "watermark.h"
 
 namespace
 {
@@ -208,7 +212,7 @@ QString SelfTest::renderHeader(const QVector<quint8> &bytes,
 	const int pages = h / 8;
 	const int size  = bytes.size();
 
-	QString s;
+	QString s = Watermark::text();
 
 	s += QStringLiteral(
 		"/* ==========================================================================\n"

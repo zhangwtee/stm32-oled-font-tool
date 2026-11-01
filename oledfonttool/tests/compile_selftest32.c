@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright (c) 2026 zhangwtee <https://github.com/zhangwtee>
+// 本文件属于「OLED 点阵取模工具」。改动请保留以上两行并注明改了什么（Apache-2.0 §4b）。
 /* 128×32 版本的自检帧单独编一遍、跑一遍。
  *
  * 为什么要单独一个文件：两份自检帧头文件的 include guard 同名

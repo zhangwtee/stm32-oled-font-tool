@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright (c) 2026 zhangwtee <https://github.com/zhangwtee>
+// 本文件属于「OLED 点阵取模工具」。改动请保留以上两行并注明改了什么（Apache-2.0 §4b）。
 /*==============================================================================
  *  fontgen.cpp  ——  汉字渲染成 N×N 点阵并编码成 OLED 字节
  *
@@ -6,6 +9,8 @@
  *  Gitee  https://gitee.com/z_w_t
  *==============================================================================*/
 #include "fontgen.h"
+
+#include "watermark.h"
 
 #include <QFile>
 #include <QImage>
@@ -487,7 +492,8 @@ QString FontGen::generateHeader(const QString &text, QString *errorOut, int colO
 	                  .arg(skipped4)
 	        : QString();
 
-	QString out;
+	/* 出处标记放在最前面：字模离开这个工具之后，只有这行能说明它从哪来 */
+	QString out = Watermark::text();
 	out += QStringLiteral(
 		"#ifndef __OLED_CFONT_H\n"
 		"#define __OLED_CFONT_H\n"

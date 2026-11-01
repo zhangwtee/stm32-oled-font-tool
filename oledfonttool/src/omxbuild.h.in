@@ -1,0 +1,12 @@
+/* 由 CMake 生成，不要手改 —— 改 omxbuild.h.in。
+ *
+ * 这两个值会随每次配置刷新：OMX_GIT_COMMIT 是配置时 HEAD 的短提交号，
+ * OMX_BUILD_DATE 是配置那天。没有 .git 的目录（比如课堂那份源码）取不到，
+ * 写 local，不影响编译。 */
+#ifndef OMXBUILD_H
+#define OMXBUILD_H
+
+#define OMX_GIT_COMMIT "@OMX_GIT_COMMIT@"
+#define OMX_BUILD_DATE "@OMX_BUILD_DATE@"
+
+#endif // OMXBUILD_H

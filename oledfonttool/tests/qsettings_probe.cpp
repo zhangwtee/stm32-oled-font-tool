@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright (c) 2026 zhangwtee <https://github.com/zhangwtee>
+// 本文件属于「OLED 点阵取模工具」。改动请保留以上两行并注明改了什么（Apache-2.0 §4b）。
 /* 一次性诊断：模拟主程序 main() 的设置初始化方式（只设 applicationName，
  * 不设 organizationName），看 QSettings 到底把值存到哪、写不写得进去。
  * 自己写入、自己删掉，跑完不留痕迹。 */

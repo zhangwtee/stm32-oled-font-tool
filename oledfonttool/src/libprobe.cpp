@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright (c) 2026 zhangwtee <https://github.com/zhangwtee>
+// 本文件属于「OLED 点阵取模工具」。改动请保留以上两行并注明改了什么（Apache-2.0 §4b）。
 /*==============================================================================
  *  libprobe.cpp  ——  工程用的是哪套库 / 哪个延时函数（实现）
  *
@@ -6,6 +9,8 @@
  *  Gitee  https://gitee.com/z_w_t
  *==============================================================================*/
 #include "libprobe.h"
+
+#include "watermark.h"
 
 #include <QDir>
 #include <QFile>
@@ -95,7 +100,8 @@ bool looksGenerated(const QString &text)
 	return text.contains(QLatin1String("__OLED_CFONT_H"))
 	       || text.contains(QLatin1String("OLED_CFONT_STRIDE"))
 	       || text.contains(QLatin1String("__ANIM_FRAMES_H"))
-	       || text.contains(QLatin1String("ANIM_FRAME_SIZE"));
+	       || text.contains(QLatin1String("ANIM_FRAME_SIZE"))
+	       || text.contains(Watermark::marker());
 }
 
 /* 按 1 基行号，给证据用 */
