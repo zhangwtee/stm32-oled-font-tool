@@ -89,7 +89,8 @@ struct Result
 	/* 有没有探到「至少一样」有用的东西。全空时调用方走老默认值 */
 	bool any() const
 	{
-		return lib != Unknown || write != WriteUnknown || !delayCall.isEmpty();
+		return lib != Unknown || write != WriteUnknown || !delayCall.isEmpty()
+		       || !showAsciiFunc.isEmpty();
 	}
 };
 
@@ -107,6 +108,12 @@ Result probeFiles(const QStringList &files);
  *
  * 默认值就是改造前的写死值 —— 探不出来时行为不变，不会把老用户坑到。
  * 探出来什么就填什么，origin 里写清依据，导出时打进注释。
+ *
+ * hasWrite / hasAscii / hasDelay 是「这一项到底探到了没有」。
+ * 必须分开记，不能拿字段值去猜：字段值永远是填好的（没探到就是默认值），
+ * 光看它分不出「探到 OLED_WriteCommand」和「没探到、留在默认值」。
+ * 接入时改写适配区只看这几个标记 —— 没探到的项一个字都不许动，
+ * 否则用户手改正确的 OLED_WR_Byte 会被改回默认的 OLED_WriteCommand。
  */
 struct CodeAdapter
 {
@@ -116,6 +123,31 @@ struct CodeAdapter
 	QString delayCall  = QStringLiteral("HAL_Delay(ms)");
 	QString origin;             /* 一行来源说明；空 = 全用默认值 */
 	bool    detected = false;   /* true = 至少一项是探出来的 */
+
+	bool    hasWrite = false;   /* writeCmd / writeData 是探出来的 */
+	bool    hasAscii = false;   /* showAscii 是探出来的 */
+	bool    hasDelay = false;   /* delayCall 是探出来的 */
+	bool    stdLib   = false;   /* 工程是标准外设库（用来提醒默认的 HAL_Delay 一定编不过） */
+
+	/* 探到东西就往这里塞。用 setter 而不是直接写字段，
+	 * 是因为忘了置 hasXxx 的话，接入时那一项会被当成"没探到"而静默不生效 ——
+	 * 这种错不报、不崩，只是悄悄不改，最难查。 */
+	void setWrite(const QString &cmd, const QString &dat)
+	{
+		writeCmd = cmd;
+		writeData = dat;
+		hasWrite = true;
+	}
+	void setShowAscii(const QString &f)
+	{
+		showAscii = f;
+		hasAscii = true;
+	}
+	void setDelay(const QString &call)
+	{
+		delayCall = call;
+		hasDelay = true;
+	}
 };
 
 /* 把探测结果翻成适配区参数 */

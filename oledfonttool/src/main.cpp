@@ -3003,10 +3003,26 @@ void MainWindow::mergeIntoProject(bool assets)
 			return;
 		}
 
+		/* 适配区会改成什么，点确认之前先说清楚。
+		 * 那几行宏不在上面的 step 列表里，事后才说就等于"顺手改了没告诉"。 */
+		const LibProbe::CodeAdapter adapter = currentAdapter(scan.fontHeader);
+		const QStringList adapterChanges =
+			MergeProject::adapterMismatch(scan.fontHeader, adapter);
+
+		QString confirmText = QStringLiteral("%1\n\n每个文件会先备份成 .oledbak。继续吗？")
+		                          .arg(what.join(QLatin1Char('\n')));
+		if (!adapterChanges.isEmpty())
+		{
+			confirmText = QStringLiteral("%1\n\n"
+			                             "另外，%2 的适配区也会按你的工程源码改一下：\n\n%3\n\n"
+			                             "每个文件都会先备份成 .oledbak。继续吗？")
+			                  .arg(what.join(QLatin1Char('\n')))
+			                  .arg(QFileInfo(scan.fontHeader).fileName())
+			                  .arg(adapterChanges.join(QLatin1Char('\n')));
+		}
+
 		const int r = QMessageBox::question(
-			&dlg, QStringLiteral("确认改这些文件"),
-			QStringLiteral("%1\n\n每个文件会先备份成 .oledbak。继续吗？")
-				.arg(what.join(QLatin1Char('\n'))),
+			&dlg, QStringLiteral("确认改这些文件"), confirmText,
 			QMessageBox::Yes | QMessageBox::No, QMessageBox::Yes);
 		if (r != QMessageBox::Yes)
 		{
@@ -3027,7 +3043,6 @@ void MainWindow::mergeIntoProject(bool assets)
 		 * 探测不到工程底子就一个字节都不动。 */
 		bool    adapterBak = false;
 		QString adapterErr;
-		const LibProbe::CodeAdapter adapter = currentAdapter(scan.fontHeader);
 		const int adapterFixed = MergeProject::applyAdapter(
 			scan.fontHeader, adapter, &adapterBak, &adapterErr);
 

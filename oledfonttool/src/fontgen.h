@@ -122,6 +122,11 @@ public:
 
 	/* 统计 */
 	static int glyphCount(const QString &text);
+
+	/* 文本里要取模的字符：去重、保持输入顺序。ASCII 和 4 字节字符不在内。
+	 * 预览和导出共用这一个，省得两边规则走散。 */
+	static QVector<QChar> glyphChars(const QString &text);
+
 	static qint64 flashBytes(int glyphCount, int size, bool withAsciiFont = true);
 
 	/* 从已有的头文件里把汉字编码读回来（导入用） */

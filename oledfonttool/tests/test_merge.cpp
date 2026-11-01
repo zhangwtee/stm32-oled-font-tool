@@ -744,6 +744,88 @@ int main(int argc, char **argv)
 		      scan3.error.contains(QStringLiteral("全部存进一个")), scan3.error);
 	}
 
+	/* ---- 适配区改写 ----
+	 * 一键接入手顺带把适配区改成探测到的写法。这段盯两件事：
+	 *   1. 没探到的项不能动 —— 只探到延时、没探到写命令写法时，
+	 *      用户手改对的 OLED_WR_Byte 不能被改回默认的 OLED_WriteCommand。
+	 *   2. 用户自己加的行尾注释不能抹掉。 */
+	{
+		const QString dir    = root + QStringLiteral("/adapter");
+		const QString header = dir + QStringLiteral("/OLED_CFont.h");
+
+		const QByteArray userEdited =
+			"#ifndef OLED_CFONT_H\n"
+			"#define OLED_CFONT_H\n"
+			"#define CF_WRITE_CMD(c)                 OLED_WR_Byte((c), 1)   /* 照我驱动改的 */\n"
+			"#define CF_WRITE_DATA(d)                OLED_WR_Byte((d), 0)\n"
+			"#define CF_SHOW_ASCII(line, col, ch)    OLED_ShowChar((line), (col), (ch))\n"
+			"#endif\n";
+
+		bool    bak  = false;
+		QString aerr;
+
+		/* ① 只探到延时，写命令写法没探到 */
+		writeFile(header, userEdited);
+		LibProbe::CodeAdapter part;
+		part.detected = true;
+		part.setDelay(QStringLiteral("Delay_ms(ms)"));
+		part.origin = QStringLiteral("标准库 · 延时 Delay_ms(ms)");
+		const int n1 = MergeProject::applyAdapter(header, part, &bak, &aerr);
+
+		const QByteArray a1 = readFile(header);
+		check("没探到写命令 -> 用户改好的那行原样不动",
+		      a1 == userEdited, QString::fromUtf8(a1));
+		check("只探到延时时一行都不改", n1 == 0, QString::number(n1));
+		check("没改动就不留备份", !bak, QString());
+
+		/* ② 探到写命令写法：该改的要改对，注释要留着 */
+		const QByteArray stale =
+			"#ifndef OLED_CFONT_H\n"
+			"#define OLED_CFONT_H\n"
+			"#define CF_WRITE_CMD(c)                 OLED_WriteCommand(c)   /* 待改 */\n"
+			"#define CF_WRITE_DATA(d)                OLED_WriteData(d)\n"
+			"#define CF_SHOW_ASCII(line, col, ch)    OLED_ShowChar((line), (col), (ch))\n"
+			"#endif\n";
+		writeFile(header, stale);
+
+		LibProbe::CodeAdapter full;
+		full.detected = true;
+		full.setWrite(QStringLiteral("OLED_WR_Byte((c), 1)"),
+		              QStringLiteral("OLED_WR_Byte((d), 0)"));
+		full.setShowAscii(QStringLiteral("OLED_ShowChar((line), (col), (ch))"));
+		full.setDelay(QStringLiteral("Delay_ms(ms)"));
+		full.origin = QStringLiteral("标准库");
+		bak = false;
+		aerr.clear();
+		const int n2 = MergeProject::applyAdapter(header, full, &bak, &aerr);
+
+		const QString s2 = QString::fromUtf8(readFile(header));
+		check("探到写命令 -> 换成 WR_Byte 写法",
+		      s2.contains(QStringLiteral("OLED_WR_Byte((c), 1)")), s2);
+		check("换写法时行尾注释保留",
+		      s2.contains(QStringLiteral("/* 待改 */")), s2);
+		check("命令 + 数据两行都改了", n2 == 2, QString::number(n2));
+		check("改完留了 .oledbak 备份", bak, QString());
+
+		/* ③ CRLF 的文件改完还得是 CRLF，不能变成 \r\r\n */
+		QByteArray crlf = stale;
+		crlf.replace("\n", "\r\n");
+		writeFile(header, crlf);
+		MergeProject::applyAdapter(header, full, &bak, &aerr);
+		const QByteArray a3 = readFile(header);
+		check("CRLF 文件改完还是 CRLF",
+		      a3.contains("OLED_WR_Byte((c), 1)") && !a3.contains("\r\r"),
+		      QStringLiteral("含 \\r\\r：%1").arg(a3.contains("\r\r") ? QStringLiteral("是")
+		                                                               : QStringLiteral("否")));
+
+		/* ④ 没探测到：一个字节都不许动 */
+		writeFile(header, stale);
+		LibProbe::CodeAdapter none;
+		const int n4 = MergeProject::applyAdapter(header, none, &bak, &aerr);
+		const QByteArray a4 = readFile(header);
+		check("没探测到 -> 一个字节都没动", a4 == stale && n4 == 0, QString::number(n4));
+	}
+
 	std::printf("\n%d passed, %d failed\n", g_pass, g_fail);
 	return g_fail == 0 ? 0 : 1;
 }

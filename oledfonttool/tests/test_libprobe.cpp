@@ -234,6 +234,63 @@ static void testNoTouchWhenUnknown(const QString &root)
 	check("没探到：文件一个字节没动", readFile(header) == original, QString());
 }
 
+/* 工具自己导出的头文件不能当证据。
+ * 否则会自我印证：生成的文件里有 CF_SHOW_ASCII → OLED_ShowChar(...)，
+ * 下次探测读到自己，就"发现"用户工程里有 OLED_ShowChar。 */
+static void testSelfPollution(const QString &root)
+{
+	const QString dir = root + QStringLiteral("/selfpollute");
+	writeFile(dir + QStringLiteral("/main.c"), "int main(void)\n{\n}\n");
+	writeFile(dir + QStringLiteral("/Hardware/OLED_CFont.h"),
+	          "#ifndef __OLED_CFONT_H\n"
+	          "#define __OLED_CFONT_H\n"
+	          "#define CF_WRITE_CMD(c)                 OLED_WriteCommand(c)\n"
+	          "#define CF_WRITE_DATA(d)                OLED_WriteData(d)\n"
+	          "#define CF_SHOW_ASCII(line, col, ch)    OLED_ShowChar((line), (col), (ch))\n"
+	          "#endif\n");
+
+	const LibProbe::Result r = LibProbe::probe(dir);
+	check("自己生成的头文件不当证据：没认出写命令",
+	      r.write == LibProbe::WriteUnknown,
+	      QString::number(static_cast<int>(r.write)));
+	check("自己生成的头文件不当证据：没认出字符函数",
+	      r.showAsciiFunc.isEmpty(), r.showAsciiFunc);
+	check("自己生成的头文件不当证据：整体报不知道", !r.any(), r.evidenceOneLine);
+}
+
+/* HAL 的招牌头文件在 Drivers/ 下面，目录过滤不能把它一起过滤掉 */
+static void testHalInDrivers(const QString &root)
+{
+	const QString dir = root + QStringLiteral("/hal2");
+	writeFile(dir + QStringLiteral("/Drivers/STM32F1xx_HAL_Driver/Inc/stm32f1xx_hal.h"),
+	          "/* HAL */\n");
+	/* 故意不写 HAL_Init，只留招牌头文件这一条证据 */
+	writeFile(dir + QStringLiteral("/Core/Src/main.c"),
+	          "int main(void)\n{\n    while (1) { }\n}\n");
+
+	const LibProbe::Result r = LibProbe::probe(dir);
+	check("Drivers 下的 stm32f1xx_hal.h 也认", r.lib == LibProbe::HAL,
+	      LibProbe::nameOf(r.lib));
+}
+
+/* 驱动里定义 OLED_WRITE_CMD(c) 这种带参宏的不算少见（多半是 I2C 地址位），
+ * 不能把这种文件当成"工具生成的"跳过 —— 那会把真正的驱动整个漏掉。 */
+static void testDriverWithCmdMacro(const QString &root)
+{
+	const QString dir = root + QStringLiteral("/cmdmacro");
+	writeFile(dir + QStringLiteral("/HARDWARE/OLED/oled.h"),
+	          "#ifndef __OLED_H\n"
+	          "#define __OLED_H\n"
+	          "#define OLED_WRITE_CMD(c)   ((c) ? 0x40 : 0x00)\n"
+	          "void OLED_WriteCommand(uint8_t cmd);\n"
+	          "void OLED_WriteData(uint8_t dat);\n"
+	          "#endif\n");
+
+	const LibProbe::Result r = LibProbe::probe(dir);
+	check("驱动里的 OLED_WRITE_CMD(c) 不误判成生成物",
+	      r.write == LibProbe::TwoFuncs, QString::number(static_cast<int>(r.write)));
+}
+
 int main(int argc, char *argv[])
 {
 	QCoreApplication app(argc, argv);
@@ -274,6 +331,9 @@ int main(int argc, char *argv[])
 	testHalProject(root);
 	testFlagByteProject(root);
 	testEmptyProject(root);
+	testSelfPollution(root);
+	testHalInDrivers(root);
+	testDriverWithCmdMacro(root);
 	testRewrite(root);
 	testNoTouchWhenUnknown(root);
 

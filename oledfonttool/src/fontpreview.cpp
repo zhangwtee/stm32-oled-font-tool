@@ -29,17 +29,9 @@ void FontPreview::setGenerator(FontGen *gen)
 
 void FontPreview::setText(const QString &text)
 {
-	QSet<QChar> seen;
-	m_chars.clear();
-	for (int i = 0; i < text.size(); ++i)
-	{
-		const QChar c = text.at(i);
-		if (c.unicode() > 0x7F && !seen.contains(c))
-		{
-			seen.insert(c);
-			m_chars.append(c);
-		}
-	}
+	/* 和导出用同一套挑选规则：去重、跳过 ASCII 和 4 字节字符。
+	 * 各写一遍的话，界面会显示「共 3 字」而导出只有 2 个字。 */
+	m_chars = FontGen::glyphChars(text);
 	updateGeometry();
 	update();
 }

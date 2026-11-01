@@ -29,7 +29,11 @@ bool isSourceName(const QString &name)
 	       || name.endsWith(QLatin1String(".hpp"), Qt::CaseInsensitive);
 }
 
-/* 这些目录里全是编译产物或者第三方库，读它们只浪费时间和误判机会 */
+/* 这些目录里全是编译产物或者第三方库，读它们只浪费时间和误判机会。
+ *
+ * 但 Drivers 不能跳：HAL 工程的招牌 stm32f1xx_hal.h 就躺在
+ * Drivers/STM32F1xx_HAL_Driver/Inc/ 下面，跳掉等于把最硬的证据扔了。
+ * 那里的头文件确实多，不过文件数和单文件字节数都有上限兜着。 */
 bool isSkippedDir(const QString &name)
 {
 	static const QStringList skip = {
@@ -37,7 +41,7 @@ bool isSkippedDir(const QString &name)
 		QStringLiteral(".idea"), QStringLiteral("build"), QStringLiteral("Build"),
 		QStringLiteral("Objects"), QStringLiteral("Listings"), QStringLiteral("Output"),
 		QStringLiteral("DebugConfig"), QStringLiteral("__pycache__"),
-		QStringLiteral("RTE"), QStringLiteral("Middlewares"), QStringLiteral("Drivers")
+		QStringLiteral("RTE"), QStringLiteral("Middlewares")
 	};
 	return skip.contains(name, Qt::CaseInsensitive);
 }
@@ -72,6 +76,25 @@ void walk(const QString &dir, QStringList *out, int *budget, int depth)
 			--(*budget);
 		}
 	}
+}
+
+/* 工具自己生成的头文件不参与识别。
+ *
+ * 不挡的话会出现自我印证：导出的 OLED_CFont.h 里有
+ *     #define CF_SHOW_ASCII(line, col, ch)  OLED_ShowChar((line), (col), (ch))
+ * 下次探测读到自己这个文件，就"发现"工程里有 OLED_ShowChar —— 其实那是
+ * 上一次自己写进去的默认值。认出来的东西必须来自用户的驱动，不能来自
+ * 自己的产物，否则错了也永远纠不回来。
+ *
+ * 判据用的是本工具独有的几个名字，不是 CF_WRITE_CMD / OLED_WRITE_CMD 那几行：
+ * 有些驱动会写 #define OLED_WRITE_CMD(c) 这类带参宏，拿它当判据就会把用户
+ * 真正的驱动整个跳过 —— 那比自我印证还糟，直接什么都探不到了。 */
+bool looksGenerated(const QString &text)
+{
+	return text.contains(QLatin1String("__OLED_CFONT_H"))
+	       || text.contains(QLatin1String("OLED_CFONT_STRIDE"))
+	       || text.contains(QLatin1String("__ANIM_FRAMES_H"))
+	       || text.contains(QLatin1String("ANIM_FRAME_SIZE"));
 }
 
 /* 按 1 基行号，给证据用 */
@@ -143,6 +166,10 @@ void scanOne(const QString &path, Result *r, int *stdScore, int *halScore,
 	const QString name = fi.fileName();
 	const QString text = readRaw(path);
 	if (text.isEmpty())
+	{
+		return;
+	}
+	if (looksGenerated(text))
 	{
 		return;
 	}
@@ -463,25 +490,26 @@ CodeAdapter adapterOf(const Result &r)
 {
 	CodeAdapter a;
 	a.detected = r.any();
+	a.stdLib   = (r.lib == StandardPeriph);
 
 	if (r.write == TwoFuncs)
 	{
-		a.writeCmd  = QStringLiteral("%1(c)").arg(r.cmdFunc);
-		a.writeData = QStringLiteral("%1(d)").arg(r.dataFunc);
+		a.setWrite(QStringLiteral("%1(c)").arg(r.cmdFunc),
+		           QStringLiteral("%1(d)").arg(r.dataFunc));
 	}
 	else if (r.write == FlagByte)
 	{
-		a.writeCmd  = QStringLiteral("%1((c), 1)").arg(r.byteFunc);
-		a.writeData = QStringLiteral("%1((d), 0)").arg(r.byteFunc);
+		a.setWrite(QStringLiteral("%1((c), 1)").arg(r.byteFunc),
+		           QStringLiteral("%1((d), 0)").arg(r.byteFunc));
 	}
 
 	if (!r.showAsciiFunc.isEmpty())
 	{
-		a.showAscii = QStringLiteral("%1((line), (col), (ch))").arg(r.showAsciiFunc);
+		a.setShowAscii(QStringLiteral("%1((line), (col), (ch))").arg(r.showAsciiFunc));
 	}
 	if (!r.delayCall.isEmpty())
 	{
-		a.delayCall = r.delayCall;
+		a.setDelay(r.delayCall);
 	}
 
 	QStringList bits;
@@ -517,10 +545,40 @@ QString adapterNote(const CodeAdapter &a)
 	{
 		return QString();
 	}
-	return QStringLiteral(
-		"/*  适配区来源：按你的工程源码自动识别 —— %1\n"
-		" *  认错了就直接改下面几行；下次导出会重新认一遍，不会记住错的那次。 */\n")
-	        .arg(a.origin);
+
+	QString s = QStringLiteral("/*  适配区来源：按你的工程源码识别到 —— %1\n").arg(a.origin);
+
+	/* 探到什么就说什么。只探到延时却让整块看着像"全都认对了"，
+	 * 用户就不会去核那几行没认出来的 —— 而没认出来的恰恰是默认值。 */
+	QStringList miss;
+	if (!a.hasWrite)
+	{
+		miss << QStringLiteral("写命令 / 写数据");
+	}
+	if (!a.hasAscii)
+	{
+		miss << QStringLiteral("字符显示");
+	}
+	if (!a.hasDelay)
+	{
+		miss << QStringLiteral("帧间延时");
+	}
+	if (!miss.isEmpty())
+	{
+		s += QStringLiteral(" *  没认出来的：%1 —— 下面那几行还是默认值，照上面的 (A)/(B) 核一下。\n")
+		         .arg(miss.join(QStringLiteral("、")));
+	}
+
+	/* 这条必须单独说：标准库工程里根本不存在 HAL_Delay，
+	 * 留着默认值就是"导出成功、编译报错"，而且报错指不到工具头上。 */
+	if (a.stdLib && !a.hasDelay)
+	{
+		s += QStringLiteral(" *  ⚠ 你的工程是标准库，可下面的延时仍是默认的 HAL_Delay ——");
+		s += QStringLiteral("标准库里没有这个函数，必须改成你自己的（例如 Delay_ms）。\n");
+	}
+
+	s += QStringLiteral(" *  认错了就直接改下面几行；下次导出会重新认一遍，不会记住错的那次。 */\n");
+	return s;
 }
 
 }   // namespace LibProbe

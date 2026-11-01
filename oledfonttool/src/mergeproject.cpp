@@ -1782,6 +1782,39 @@ QString slotValue(int kind, const LibProbe::CodeAdapter &a)
 	}
 }
 
+/* 这一项到底探到了没有。
+ * 只探到延时、没探到写命令写法时，writeCmd 里躺的是默认值
+ * OLED_WriteCommand —— 拿它去覆盖用户手改对的 OLED_WR_Byte，等于把
+ * 本来能编过的文件改坏。所以没探到的项一律跳过，一个字都不动。 */
+bool slotDetected(int kind, const LibProbe::CodeAdapter &a)
+{
+	switch (kind)
+	{
+	case SlotCmd:
+	case SlotData:  return a.hasWrite;
+	case SlotAscii: return a.hasAscii;
+	default:        return a.hasDelay;
+	}
+}
+
+/* 值后面如果跟着注释，把注释原样留下来 —— 用户可能会在宏后面写一句
+ * 「这里换成我自己的驱动」，改值时把整行尾巴截掉就把这句抹了。 */
+QString trailingComment(const QString &value)
+{
+	int cut = -1;
+	const int block = value.indexOf(QLatin1String("/*"));
+	const int line  = value.indexOf(QLatin1String("//"));
+	if (block >= 0 && (line < 0 || block < line))
+	{
+		cut = block;
+	}
+	else if (line >= 0)
+	{
+		cut = line;
+	}
+	return (cut < 0) ? QString() : value.mid(cut).trimmed();
+}
+
 bool readRawBytes(const QString &path, QByteArray *raw)
 {
 	QFile f(path);
@@ -1799,6 +1832,7 @@ struct AdapterDiff
 	QString sig;            /* 宏名，给提示用 */
 	QString oldValue;
 	QString newValue;
+	QString tail;           /* 值后面原有的注释，替换时原样接回去 */
 };
 
 /* 适配区全是 ASCII，按 Latin-1 转成 QString 处理再写回：一个字节对一字符，
@@ -1834,7 +1868,23 @@ QVector<AdapterDiff> collectDiffs(const QStringList &lines, const LibProbe::Code
 
 			const QString oldV = t.mid(sig.size()).trimmed();
 			const QString newV = slotValue(s.kind, a);
-			if (oldV == newV)
+			const QString tail = trailingComment(oldV);
+
+			/* 没探到的项：哪怕值看起来不一样也不动。
+			 * 这里躺的是默认值，不是「你的工程该用什么」。 */
+			if (!slotDetected(s.kind, a))
+			{
+				break;
+			}
+
+			/* 比较时不算行尾注释：值本来就对、只是用户加了句说明，
+			 * 这种行不该被"修正"一遍（改了也是白改，还会平白多出备份）。 */
+			QString oldBare = oldV;
+			if (!tail.isEmpty())
+			{
+				oldBare = oldV.left(oldV.indexOf(tail)).trimmed();
+			}
+			if (oldBare == newV)
 			{
 				break;
 			}
@@ -1842,8 +1892,9 @@ QVector<AdapterDiff> collectDiffs(const QStringList &lines, const LibProbe::Code
 			AdapterDiff d;
 			d.line     = i;
 			d.sig      = QString::fromLatin1(s.sig);
-			d.oldValue = oldV;
+			d.oldValue = oldBare;
 			d.newValue = newV;
+			d.tail     = tail;
 			out.append(d);
 			break;
 		}
@@ -1936,8 +1987,12 @@ int applyAdapter(const QString &headerPath, const LibProbe::CodeAdapter &adapter
 			++vs;
 		}
 
-		lines[d.line] = line.left(vs) + d.newValue
-		                + (crlf ? QStringLiteral("\r") : QString());
+		QString rebuilt = line.left(vs) + d.newValue;
+		if (!d.tail.isEmpty())
+		{
+			rebuilt += QStringLiteral("   ") + d.tail;
+		}
+		lines[d.line] = rebuilt + (crlf ? QStringLiteral("\r") : QString());
 	}
 
 	/* 备份：apply() 可能已经备份过，那就沿用 —— 撤销一次回到接入前的状态 */

@@ -1377,6 +1377,38 @@ int main(int argc, char **argv)
 		      ImageGen::totalUsage(one).bytes == ImageGen::totalUsage(two).bytes);
 	}
 
+	/* ---------------- 4 字节字符 ----------------
+	 * 「𠮷」这种扩展 B 区生僻字和 emoji，UTF-8 是 4 字节，在 QString 里存成
+	 * 两个代理项。逐 QChar 处理的话会各生成一张点阵，而两张都是无效的
+	 * （半个代理项画不出东西），显示函数又根本不查它的表 —— 白占 Flash。 */
+	std::printf("[4 字节字符]\n");
+	{
+		FontGen gen(QFont(QStringLiteral("SimSun"), 16), 110, 16);
+
+		/* 用一个代理对拼出 4 字节字符：C++ 的 \u 不允许直接写代理项，
+		 * 只好按 UTF-8 字节还原。U+20BB7 是 F0 A0 AE B7。 */
+		auto fourByte = [](const char *utf8) { return QString::fromUtf8(utf8); };
+
+		const QString mixed = QStringLiteral("张") + fourByte("\xF0\xA0\xAE\xB7");   /* 张 + 𠮷 */
+		check("生僻字不拆成两个字形", FontGen::glyphCount(mixed) == 1,
+		      QString::number(FontGen::glyphCount(mixed)));
+
+		QString err;
+		const QString h = gen.generateHeader(mixed, &err);
+		check("含生僻字时仍然生成得出来", !h.isEmpty(), err);
+		check("文件头说明跳过了几个 4 字节字符",
+		      h.contains(QStringLiteral("4 字节字符未收录")), QString());
+
+		/* 纯 emoji：一个字形都不该生成，且要说清为什么 */
+		const QString emoji = fourByte("\xF0\x9F\x98\x80");                        /* U+1F600 */
+		QString err2;
+		const QString h2 = gen.generateHeader(emoji, &err2);
+		check("纯 emoji 不生成字库", h2.isEmpty(), QString::number(h2.size()));
+		check("纯 emoji 时说清了原因", err2.contains(QStringLiteral("4 字节")), err2);
+		check("纯 emoji 时字数是 0", FontGen::glyphCount(emoji) == 0,
+		      QString::number(FontGen::glyphCount(emoji)));
+	}
+
 	std::printf("\n%d passed, %d failed\n", g_pass, g_fail);
 	return g_fail == 0 ? 0 : 1;
 }

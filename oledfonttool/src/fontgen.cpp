@@ -345,17 +345,67 @@ QVector<quint8> FontGen::glyphBytes(QChar ch) const
 	return out;
 }
 
-int FontGen::glyphCount(const QString &text)
+/* 把文本里要取模的字符挑出来：去重，保持出现的先后顺序。
+ *
+ * 预览和导出都走这一个入口 —— 各写一套的话，迟早会一边跳过 4 字节字符
+ * 另一边不跳，界面上显示「共 3 字」而导出的字库只有 2 个字。
+ *
+ * 4 字节字符（emoji、扩展 B 区生僻字如「𠮷」）在 QString 里存成两个代理项。
+ * 要是逐 QChar 处理，同一个字会被当成两个不同的字各生成一张点阵 —— 而
+ * 生成出来的两张都是无效的（半个代理项画不出东西），显示函数又根本不查
+ * 它的表，只是一个字宽两个字宽地跳过去。结果就是白占 Flash，字数统计还
+ * 翻倍。这里整个跳过，顺便把个数记下来告诉用户。
+ *
+ * ASCII 也不进这张表：走驱动自带的 8x16 字库。
+ *
+ * skipped4 传 nullptr 表示不关心个数。 */
+static QVector<QChar> glyphCharsOf(const QString &text, int *skipped4)
 {
-	QSet<QChar> set;
+	QSet<QChar>    set;
+	QVector<QChar> list;
+	int            skip = 0;
+
 	for (int i = 0; i < text.size(); ++i)
 	{
-		if (text.at(i).unicode() > 0x7F)         /* ASCII 走原字库，不进这个表 */
+		const QChar c = text.at(i);
+
+		if (c.isHighSurrogate())
 		{
-			set.insert(text.at(i));
+			/* 成对的算一个字符，落单的也只算一个 */
+			if (i + 1 < text.size() && text.at(i + 1).isLowSurrogate())
+			{
+				++i;
+			}
+			++skip;
+			continue;
+		}
+		if (c.isLowSurrogate())
+		{
+			++skip;
+			continue;
+		}
+		if (c.unicode() > 0x7F && !set.contains(c))
+		{
+			set.insert(c);
+			list.append(c);
 		}
 	}
-	return set.size();
+
+	if (skipped4)
+	{
+		*skipped4 = skip;
+	}
+	return list;
+}
+
+QVector<QChar> FontGen::glyphChars(const QString &text)
+{
+	return glyphCharsOf(text, nullptr);
+}
+
+int FontGen::glyphCount(const QString &text)
+{
+	return glyphCharsOf(text, nullptr).size();
 }
 
 qint64 FontGen::flashBytes(int count, int size, bool withAsciiFont)
@@ -385,27 +435,22 @@ QString FontGen::generateHeader(const QString &text, QString *errorOut, int colO
 
 	QChar *chars = nullptr;
 	int n = 0;
+	int skipped4 = 0;
 	{
-		QSet<QChar> set;
-		QVector<QChar> list;
-		for (int i = 0; i < text.size(); ++i)
-		{
-			const QChar c = text.at(i);
-			if (c.unicode() > 0x7F && !set.contains(c))
-			{
-				set.insert(c);
-				list.append(c);
-			}
-		}
-		/* 按 UTF-8 编码排序，和 Python 脚本产出一致，方便 diff */
+		QVector<QChar> list = glyphCharsOf(text, &skipped4);
+		/* 按 UTF-8 编码排序，和 Python 脚本产出一致，方便 diff。
+		 * 预览那边要的是输入顺序，所以排序放在这里，不放进 glyphCharsOf。 */
 		std::sort(list.begin(), list.end(), [](const QChar &a, const QChar &b) {
 			return QString(a).toUtf8() < QString(b).toUtf8();
 		});
 		n = list.size();
-		chars = new QChar[n];
-		for (int i = 0; i < n; ++i)
+		if (n > 0)
 		{
-			chars[i] = list.at(i);
+			chars = new QChar[n];
+			for (int i = 0; i < n; ++i)
+			{
+				chars[i] = list.at(i);
+			}
 		}
 	}
 
@@ -414,7 +459,9 @@ QString FontGen::generateHeader(const QString &text, QString *errorOut, int colO
 		delete[] chars;
 		if (errorOut)
 		{
-			*errorOut = QStringLiteral("没有可生成的汉字（ASCII 字符走原有字库，不需要取模）");
+			*errorOut = skipped4 > 0
+			        ? QStringLiteral("只有 4 字节字符（emoji、扩展区生僻字），字库不收这些")
+			        : QStringLiteral("没有可生成的汉字（ASCII 字符走原有字库，不需要取模）");
 		}
 		return QString();
 	}
@@ -430,6 +477,14 @@ QString FontGen::generateHeader(const QString &text, QString *errorOut, int colO
 	const QString invNote = m_invert
 	        ? QStringLiteral(" *      【本字库已取反】每一位都反了，屏上是亮底暗字（反白）。\n"
 	                         " *      要改回普通白字黑底，把取反开关关掉重新导出即可。\n")
+	        : QString();
+
+	/* 跳过的 4 字节字符要说一声。不说的话，用户在输入框里明明打了 emoji，
+	 * 导出后既没有报错也不在字库里，只会以为工具漏字了。 */
+	const QString skipNote = (skipped4 > 0)
+	        ? QStringLiteral(" *  （另有 %1 个 4 字节字符未收录：emoji、扩展区生僻字。\n"
+	                         " *    显示函数遇到它们会直接跳过，不占 Flash。）\n")
+	                  .arg(skipped4)
 	        : QString();
 
 	QString out;
@@ -478,7 +533,7 @@ QString FontGen::generateHeader(const QString &text, QString *errorOut, int colO
 		.arg(pages)
 		.arg(stride)
 		.arg(tbl)
-		.arg(invNote);
+		.arg(invNote + skipNote);
 
 	for (int i = 0; i < n; ++i)
 	{
