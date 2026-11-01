@@ -32,6 +32,14 @@ CMakeUserPresets.json
 oledfonttool/tests/build/
 oledfonttool/tests/out/
 
+# 在 tests/fixture 目录里直接跑 test_emit 时，outDir 默认是「当前目录/out」，
+# 产物会落到 fixture 里，还会覆盖同名的 OLED_CFont.h / OLED_SelfTest.h。
+# 下面这几个名字是它写死的输出，不是源码。
+oledfonttool/tests/fixture/out/
+oledfonttool/tests/fixture/OLED_CFont32.h
+oledfonttool/tests/fixture/anim_dedup.h
+oledfonttool/tests/fixture/selftest32/
+
 # ---- 编译中间件 --------------------------------------------------------
 *.obj
 *.o
