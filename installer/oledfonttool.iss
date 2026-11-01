@@ -10,7 +10,7 @@
 ; ============================================================================
 
 #define MyAppName        "OLED 点阵取模工具"
-#define MyAppVersion     "1.3"
+#define MyAppVersion     "1.31"
 #define MyAppPublisher   "zhangwtee"
 #define MyAppURL         "https://github.com/zhangwtee/stm32-oled-font-tool"
 #define MyAppExeName     "oledmatrix.exe"
