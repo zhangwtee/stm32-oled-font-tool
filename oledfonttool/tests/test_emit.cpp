@@ -98,6 +98,40 @@ int main(int argc, char **argv)
 		b2.replace(re, QStringLiteral("#define CF_COL_OFFSET X"));
 		check("改动只落在这一行", a2 == b2);
 
+		/* 每个字后面的注释里要带这个字的 C 字符串，连引号复制出来就能粘进代码。
+		 * 这里逐字核对：按约定拼出的那一行必须原样出现在文件里 —— 既钉住了
+		 * "注释里得有"，也钉住了写法（每个字节一律 \xNN 两位大写，不许用
+		 * 可打印字符代替，否则碰到引号、反斜杠时粘过去就是错的）。 */
+		{
+			static const char hexd[] = "0123456789ABCDEF";
+			bool    okLine = true;
+			QString firstBad;
+
+			for (const QString &ch : { QStringLiteral("温"), QStringLiteral("度"),
+			                           QStringLiteral("正"), QStringLiteral("常") })
+			{
+				const QByteArray u8 = ch.toUtf8();
+				QString lit = QStringLiteral("\"");
+				for (int i = 0; i < u8.size(); ++i)
+				{
+					const quint8 v = static_cast<quint8>(u8.at(i));
+					lit += QStringLiteral("\\x");
+					lit += QLatin1Char(hexd[(v >> 4) & 0x0F]);
+					lit += QLatin1Char(hexd[v & 0x0F]);
+				}
+				lit += QStringLiteral("\"");
+
+				const QString want = QStringLiteral("\t/* %1  %2 */").arg(ch, lit);
+				if (!a.contains(want))
+				{
+					okLine = false;
+					firstBad = want;
+					break;
+				}
+			}
+			check("每个字后面带可直接复制的 C 字符串", okLine, firstBad);
+		}
+
 		writeFile(QDir(outDir).absoluteFilePath(QStringLiteral("OLED_CFont.h")), b);
 
 		/* 屏高：128×32 的屏只有 4 页，字库里的 CF_SCREEN_H 必须跟着变，

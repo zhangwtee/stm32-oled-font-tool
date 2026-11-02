@@ -403,6 +403,30 @@ static QVector<QChar> glyphCharsOf(const QString &text, int *skipped4)
 	return list;
 }
 
+/* 把一个字写成 C 字符串字面量，形如 "\xE5\xBC\xA0"。
+ *
+ * 每个字节一律写成 \xNN，绝不用可打印字符代替：这样不管字里有没有引号、
+ * 反斜杠、% 号，粘进代码都是安全的。而且每段都自带反斜杠，避免了
+ * "\xE5a" 这种 \x 转义把后面紧跟的十六进制字符一起吞掉的经典坑。
+ *
+ * 数值两位大写，和字模数据的十六进制保持一致，看着整齐。 */
+static QString cLiteralOf(const QChar &ch)
+{
+	static const char digits[] = "0123456789ABCDEF";
+	const QByteArray  u8       = QString(ch).toUtf8();
+
+	QString s = QLatin1String("\"");
+	for (int i = 0; i < u8.size(); ++i)
+	{
+		const quint8 v = static_cast<quint8>(u8.at(i));
+		s += QStringLiteral("\\x");
+		s += QLatin1Char(digits[(v >> 4) & 0x0F]);
+		s += QLatin1Char(digits[v & 0x0F]);
+	}
+	s += QLatin1Char('"');
+	return s;
+}
+
 QVector<QChar> FontGen::glyphChars(const QString &text)
 {
 	return glyphCharsOf(text, nullptr);
@@ -531,7 +555,10 @@ QString FontGen::generateHeader(const QString &text, QString *errorOut, int colO
 		"#define OLED_CFONT_BYTES   %2\n"
 		"#define OLED_CFONT_STRIDE  %4\n"
 		"\n"
-		"/* 汉字码表：每行 %4 字节 = UTF-8 三字节编码 + %1x%1 点阵(%2 字节) */\n"
+		"/* 汉字码表：每行 %4 字节 = UTF-8 三字节编码 + %1x%1 点阵(%2 字节)。\n"
+		"   每个字后面的注释里带一串 \"\\xNN\\xNN\\xNN\"，那是这个字的 C 字符串，\n"
+		"   连引号一起复制进代码就能用，不必回来查编码：\n"
+		"       OLED_CFont_ShowString(1, 1, <把注释里那串粘在这儿>); */\n"
 		"const uint8_t %5[][%4] =\n"
 		"{\n")
 		.arg(S)
@@ -573,7 +600,13 @@ QString FontGen::generateHeader(const QString &text, QString *errorOut, int colO
 			hex += QLatin1Char(digits[v & 0x0F]);
 		}
 
-		out += QStringLiteral("\t/* %1 */\n\t%2,\n").arg(QString(chars[i]), hex);
+		/* 注释里除了字本身，再带上这个字的 C 字符串字面量。
+		 * 目的很实在：要显示某几个字时，不用回工具里重新点一遍、也不用记
+		 * 编码，直接从这儿连引号一起复制就能粘进代码。
+		 * 放在注释里而不是单独一列，是因为它不能出现在初始化列表里——
+		 * 字符串和字节混排会让编译器从第二行起把字符串当成指针值。 */
+		out += QStringLiteral("\t/* %1  %2 */\n\t%3,\n")
+		           .arg(QString(chars[i]), cLiteralOf(chars[i]), hex);
 	}
 
 	out += QStringLiteral(

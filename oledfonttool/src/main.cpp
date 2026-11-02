@@ -4125,7 +4125,11 @@ void MainWindow::exportHeader(bool askForPath)
 	                                        "工程里没有中文显示函数也能直接用：\n"
 	                                        "把文件里【适配区】的宏指向你的写命令、写数据函数，"
 	                                        "然后调用\n"
-	                                        "    OLED_CFont_ShowString(行, 列, \"要显示的文字\");")
+	                                        "    OLED_CFont_ShowString(行, 列, \"要显示的文字\");\n\n"
+	                                        "要显示的那几个字的 C 字符串也在头文件里：\n"
+	                                        "每个字后面的注释就带着一串，连引号一起复制、粘进代码即可。\n"
+	                                        "    /* 温  \"\\xE6\\xB8\\xA9\" */\n"
+	                                        "这样不必回工具里重新点一遍，也不用自己记汉字编码。")
 	                         .arg(m_headerPath)
 	                         .arg(m_gen.size())
 	                         .arg(m_preview->glyphCount())
