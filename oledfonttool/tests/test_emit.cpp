@@ -130,6 +130,26 @@ int main(int argc, char **argv)
 				}
 			}
 			check("每个字后面带可直接复制的 C 字符串", okLine, firstBad);
+
+			/* 头文件里那条示例必须是"能直接编译的一整句"，而且用库里真有的字。
+			 * 以前写过「连引号复制就能用」，那是在骗人：单字串只是参数，得自己
+			 * 拼进函数、多个字还得接起来。
+			 *
+			 * 不去猜示例用的是哪个字（导出时会按 UTF-8 排序，和 glyphChars()
+			 * 的输入顺序不是一回事），只要求它跟库里某一个字对得上。 */
+			bool    hasCall = false;
+			QString lastTry;
+			for (const QChar &c : FontGen::glyphChars(QStringLiteral("温度正常")))
+			{
+				lastTry = QStringLiteral("OLED_CFont_ShowString(1, 1, %1);   /* 显示「%2」 */")
+				                  .arg(FontGen::cLiteral(c), QString(c));
+				if (a.contains(lastTry))
+				{
+					hasCall = true;
+					break;
+				}
+			}
+			check("文件头带一条完整可用的调用示例（用库里真有的字）", hasCall, lastTry);
 		}
 
 		writeFile(QDir(outDir).absoluteFilePath(QStringLiteral("OLED_CFont.h")), b);

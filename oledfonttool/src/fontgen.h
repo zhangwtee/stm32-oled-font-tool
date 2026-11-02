@@ -130,6 +130,10 @@ public:
 	 * 预览和导出共用这一个，省得两边规则走散。 */
 	static QVector<QChar> glyphChars(const QString &text);
 
+	/* 把一个字写成 C 字符串字面量，形如 "\xE6\xB8\xA9"（带引号）。
+	 * 导出文件里的注释、以及导出成功的提示都用这一份，免得两边写法走散。 */
+	static QString cLiteral(const QChar &ch);
+
 	static qint64 flashBytes(int glyphCount, int size, bool withAsciiFont = true);
 
 	/* 从已有的头文件里把汉字编码读回来（导入用） */

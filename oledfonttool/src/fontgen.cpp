@@ -427,6 +427,11 @@ static QString cLiteralOf(const QChar &ch)
 	return s;
 }
 
+QString FontGen::cLiteral(const QChar &ch)
+{
+	return cLiteralOf(ch);
+}
+
 QVector<QChar> FontGen::glyphChars(const QString &text)
 {
 	return glyphCharsOf(text, nullptr);
@@ -516,6 +521,13 @@ QString FontGen::generateHeader(const QString &text, QString *errorOut, int colO
 	                  .arg(skipped4)
 	        : QString();
 
+	/* 文件头里给一条真能跑起来的调用示例，用本库的第一个字。
+	 * 不写死「温度」这类字：它们未必在眼前这份字库里，照着抄反而显示不出来，
+	 * 那比不给示例更糟。 */
+	const QString sampleCall = QStringLiteral(
+	        "OLED_CFont_ShowString(1, 1, %1);   /* 显示「%2」 */")
+	        .arg(cLiteralOf(chars[0]), QString(chars[0]));
+
 	/* 出处标记放在最前面：字模离开这个工具之后，只有这行能说明它从哪来 */
 	QString out = Watermark::text();
 	out += QStringLiteral(
@@ -556,9 +568,10 @@ QString FontGen::generateHeader(const QString &text, QString *errorOut, int colO
 		"#define OLED_CFONT_STRIDE  %4\n"
 		"\n"
 		"/* 汉字码表：每行 %4 字节 = UTF-8 三字节编码 + %1x%1 点阵(%2 字节)。\n"
-		"   每个字后面的注释里带一串 \"\\xNN\\xNN\\xNN\"，那是这个字的 C 字符串，\n"
-		"   连引号一起复制进代码就能用，不必回来查编码：\n"
-		"       OLED_CFont_ShowString(1, 1, <把注释里那串粘在这儿>); */\n"
+		"   每个字后面的注释里带着这个字的 C 字符串。显示时填进显示函数即可，\n"
+		"   比如本库的第一个字：\n"
+		"       %7\n"
+		"   要显示几个字，把各字的串接起来拼成一句。 */\n"
 		"const uint8_t %5[][%4] =\n"
 		"{\n")
 		.arg(S)
@@ -566,7 +579,8 @@ QString FontGen::generateHeader(const QString &text, QString *errorOut, int colO
 		.arg(pages)
 		.arg(stride)
 		.arg(tbl)
-		.arg(invNote + skipNote);
+		.arg(invNote + skipNote)
+		.arg(sampleCall);
 
 	for (int i = 0; i < n; ++i)
 	{

@@ -4118,6 +4118,14 @@ void MainWindow::exportHeader(bool askForPath)
 		  .arg(m_gen.size())
 		  .arg(FontGen::tableName(m_gen.size()));
 
+	/* 弹窗里的示例也用当前输入的第一个字，和头文件里那条保持一致。
+	 * 写死一个不一定在字库里的字，用户照着抄反而显示不出来。 */
+	const QVector<QChar> glyphs = FontGen::glyphChars(m_text->toPlainText());
+	const QString sampleCall = glyphs.isEmpty()
+		? QString()
+		: QStringLiteral("    OLED_CFont_ShowString(1, 1, %1);")
+		  .arg(FontGen::cLiteral(glyphs.first()));
+
 	QMessageBox::information(this, QStringLiteral("导出成功"),
 	                         QStringLiteral("已写入：\n%1\n\n%2×%2 点阵，汉字 %3 个，%4 字节\n"
 	                                        "在 Keil 里 Rebuild 即可生效。%5\n\n"
@@ -4126,15 +4134,16 @@ void MainWindow::exportHeader(bool askForPath)
 	                                        "把文件里【适配区】的宏指向你的写命令、写数据函数，"
 	                                        "然后调用\n"
 	                                        "    OLED_CFont_ShowString(行, 列, \"要显示的文字\");\n\n"
-	                                        "要显示的那几个字的 C 字符串也在头文件里：\n"
-	                                        "每个字后面的注释就带着一串，连引号一起复制、粘进代码即可。\n"
-	                                        "    /* 温  \"\\xE6\\xB8\\xA9\" */\n"
-	                                        "这样不必回工具里重新点一遍，也不用自己记汉字编码。")
+	                                        "每个字的 C 字符串也写在头文件里——就在它点阵上面那行注释，\n"
+	                                        "显示哪个字就用哪个字的，多个字接起来拼成一句，例如：\n"
+	                                        "%6\n"
+	                                        "头文件开头还有一条同样格式的示例。")
 	                         .arg(m_headerPath)
 	                         .arg(m_gen.size())
 	                         .arg(m_preview->glyphCount())
 	                         .arg(totalBytes)
-	                         .arg(sizeNote));
+	                         .arg(sizeNote)
+	                         .arg(sampleCall));
 
 	/* 导出成功后顺便检查一下工程源码的编码。
 	 * 编码不一致时字库能写进去、Keil 也能编译，但屏幕上不会显示汉字，
