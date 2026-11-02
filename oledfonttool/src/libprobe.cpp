@@ -792,4 +792,153 @@ QString adapterNote(const CodeAdapter &a)
 	return s;
 }
 
+namespace {
+
+struct DrvProto
+{
+	QString name;
+	int     argc = 1;
+};
+
+/*  宏体 → 函数名 + 参数个数。不是「名字(简单参数, ...)」这种朴素调用就返回 false。
+ *
+ *  为什么要求「简单」：宏体可能是 HAL_I2C_Master_Transmit(&hi2c1, ...) 这种，
+ *  带 & 和结构体成员，按它猜出来的原型一定是错的 —— 那样报的就不是警告，
+ *  而是 "conflicting types" 硬错误，比原来的 #223-D 更难收场。 */
+bool parseProto(const QString &expr, DrvProto *out)
+{
+	const QString t  = expr.trimmed();
+	const int     lp = t.indexOf(QLatin1Char('('));
+	if (lp <= 0 || !t.endsWith(QLatin1Char(')')))
+	{
+		return false;
+	}
+
+	const QString name = t.left(lp).trimmed();
+	static const QRegularExpression ident(
+	        QStringLiteral("^[A-Za-z_][A-Za-z0-9_]*$"));
+	if (!ident.match(name).hasMatch())
+	{
+		return false;
+	}
+
+	const QString args = t.mid(lp + 1, t.size() - lp - 2);
+
+	/* 每个顶层参数只允许「标识符」或「数字」，允许外面再套括号。
+	 * 出现 & * . -> [ ] 之类就说明这不是一次朴素调用，别猜。 */
+	static const QRegularExpression simple(
+	        QStringLiteral("^(?:[A-Za-z_][A-Za-z0-9_]*|(?:0[xX])?[0-9]+[uUlL]*)$"));
+
+	int     argc  = 1;
+	int     depth = 0;
+	QString cur;
+
+	auto flush = [&]() -> bool {
+		QString a = cur.trimmed();
+		cur.clear();
+		while (a.size() >= 2 && a.startsWith(QLatin1Char('('))
+		       && a.endsWith(QLatin1Char(')')))
+		{
+			a = a.mid(1, a.size() - 2).trimmed();
+		}
+		return simple.match(a).hasMatch();
+	};
+
+	for (const QChar c : args)
+	{
+		if (c == QLatin1Char('('))
+		{
+			++depth;
+		}
+		else if (c == QLatin1Char(')'))
+		{
+			--depth;
+		}
+		else if (c == QLatin1Char(',') && depth == 0)
+		{
+			if (!flush())
+			{
+				return false;
+			}
+			++argc;
+			continue;
+		}
+		cur += c;
+	}
+	if (!flush())
+	{
+		return false;
+	}
+
+	out->name = name;
+	out->argc = argc;
+	return true;
+}
+
+}   // namespace
+
+QString driverDeclBlock(const CodeAdapter &a, const QString &macroName)
+{
+	QVector<DrvProto> protos;
+	QStringList       names;
+	for (const QString &expr : { a.writeCmd, a.writeData })
+	{
+		DrvProto p;
+		if (!parseProto(expr, &p))
+		{
+			continue;
+		}
+		bool dup = false;
+		for (const DrvProto &q : protos)
+		{
+			if (q.name == p.name && q.argc == p.argc)
+			{
+				dup = true;
+				break;
+			}
+		}
+		if (!dup)
+		{
+			protos << p;
+			names << QStringLiteral("%1()").arg(p.name);
+		}
+	}
+	if (protos.isEmpty())
+	{
+		return QString();
+	}
+
+	QString lines;
+	for (const DrvProto &p : protos)
+	{
+		QStringList args;
+		for (int i = 0; i < p.argc; ++i)
+		{
+			args << QStringLiteral("uint8_t");
+		}
+		lines += QStringLiteral("void %1(%2);\n").arg(p.name, args.join(QStringLiteral(", ")));
+	}
+
+	return QStringLiteral(
+	        "/* 驱动函数的原型声明。\n"
+	        " *\n"
+	        " * 不少例程把 %1 只写在驱动 .c 里、没在 .h 里导出，\n"
+	        " * 上面那些宏展开后编译器没见过这些名字，就报\n"
+	        " *     warning: #223-D: function \"...\" declared implicitly\n"
+	        " * 这里替你补上，不用去改驱动头文件。\n"
+	        " *\n"
+	        " * 下面三种情况把它关掉（改成 0）：\n"
+	        " *   1) 驱动里这些函数的参数类型不是 uint8_t —— 声明和定义对不上会报 error\n"
+	        " *   2) 它们是 static 函数，或者是宏\n"
+	        " *   3) 你就想自己维护这份声明\n"
+	        " */\n"
+	        "#define %2                  1\n"
+	        "\n"
+	        "#if %2\n"
+	        "%3"
+	        "#endif\n"
+	        "\n")
+	        .arg(names.join(QStringLiteral(" / ")), macroName, lines);
+}
+
 }   // namespace LibProbe

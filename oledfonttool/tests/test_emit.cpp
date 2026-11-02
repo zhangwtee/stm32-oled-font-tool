@@ -130,26 +130,18 @@ int main(int argc, char **argv)
 				}
 			}
 			check("每个字后面带可直接复制的 C 字符串", okLine, firstBad);
+		}
 
-			/* 头文件里那条示例必须是"能直接编译的一整句"，而且用库里真有的字。
-			 * 以前写过「连引号复制就能用」，那是在骗人：单字串只是参数，得自己
-			 * 拼进函数、多个字还得接起来。
-			 *
-			 * 不去猜示例用的是哪个字（导出时会按 UTF-8 排序，和 glyphChars()
-			 * 的输入顺序不是一回事），只要求它跟库里某一个字对得上。 */
-			bool    hasCall = false;
-			QString lastTry;
-			for (const QChar &c : FontGen::glyphChars(QStringLiteral("温度正常")))
-			{
-				lastTry = QStringLiteral("OLED_CFont_ShowString(1, 1, %1);   /* 显示「%2」 */")
-				                  .arg(FontGen::cLiteral(c), QString(c));
-				if (a.contains(lastTry))
-				{
-					hasCall = true;
-					break;
-				}
-			}
-			check("文件头带一条完整可用的调用示例（用库里真有的字）", hasCall, lastTry);
+		/* 文件头那条示例必须是"能直接编译的一整句"，而且用的是本库第一个字。
+		 *
+		 * 「温度正常」四个字按 UTF-8 编码排序是 常(E5B8B8) 度(E5BAA6)
+		 * 正(E6ADA3) 温(E6B8A9)，所以第一个字是「常」。这里把字节串手写出来，
+		 * 不用被测代码里的 cLiteral()，否则等于自己验自己。 */
+		{
+			const QString want = QStringLiteral(
+			        "OLED_CFont_ShowString(1, 1, \"\\xE5\\xB8\\xB8\");");
+			check("文件头示例用本库第一个字「常」，且是完整的一条调用",
+			      a.contains(want), want);
 		}
 
 		writeFile(QDir(outDir).absoluteFilePath(QStringLiteral("OLED_CFont.h")), b);
@@ -201,6 +193,43 @@ int main(int argc, char **argv)
 		      !withAd.contains(QStringLiteral("HAL_Delay")), QString());
 		check("适配区：注释里写了识别依据",
 		      withAd.contains(QStringLiteral("适配区来源")), QString());
+
+		/* 驱动函数的原型声明。
+		 *
+		 * 这条是给 Keil 的 "warning: #223-D: function ... declared implicitly"
+		 * 兜底的：很多例程把写命令 / 写数据只定义在 .c 里，.h 里没有原型，
+		 * 字库一调用就报警告。生成的头文件自己带上声明，用户不用去改驱动头。
+		 *
+		 * 声明必须落在调用之前 —— 落到 CF_SET_POS 后面等于没写。 */
+		check("默认适配区补了驱动函数声明",
+		      a.contains(QStringLiteral("void OLED_WriteCommand(uint8_t);"))
+		          && a.contains(QStringLiteral("void OLED_WriteData(uint8_t);")),
+		      QString());
+		check("声明在 CF_SET_POS 之前",
+		      a.indexOf(QStringLiteral("void OLED_WriteCommand(uint8_t);"))
+		          < a.indexOf(QStringLiteral("#define CF_SET_POS")),
+		      QString::number(a.indexOf(QStringLiteral("void OLED_WriteCommand(uint8_t);"))));
+
+		/* 标志位写法是一个函数两个参数，声明要跟着变，而且只能出现一次 */
+		check("标志位写法按两个参数声明",
+		      withAd.contains(QStringLiteral("void OLED_WR_Byte(uint8_t, uint8_t);")),
+		      QString());
+		check("标志位写法不再声明 OLED_WriteCommand",
+		      !withAd.contains(QStringLiteral("void OLED_WriteCommand")), QString());
+		check("同一个函数只声明一次",
+		      withAd.count(QStringLiteral("void OLED_WR_Byte(")) == 1,
+		      QString::number(withAd.count(QStringLiteral("void OLED_WR_Byte("))));
+
+		/* 宏体不是朴素函数调用时不猜。HAL 那种带 & 和成员访问的，按它猜出来的
+		 * 原型一定是错的 —— 那是把一条警告换成一条 error。 */
+		{
+			LibProbe::CodeAdapter cx;
+			cx.writeCmd  = QStringLiteral("HAL_I2C_Master_Transmit(&hi2c1, 0x78, &c, 1, 10)");
+			cx.writeData = QStringLiteral("HAL_I2C_Master_Transmit(&hi2c1, 0x78, &d, 1, 10)");
+			const QString hx = gen.generateHeader(QStringLiteral("温度正常"), &err, 0, 64, cx);
+			check("宏体不是函数调用时不硬编声明",
+			      !hx.contains(QStringLiteral("#define CF_DRIVER_DECL")), QString());
+		}
 
 		/* 换了适配区，点阵数据本身一个字节都不能变。字模表在适配区之前，
 		 * 所以比「从第一个 0x 到适配区注释」这一段。 */

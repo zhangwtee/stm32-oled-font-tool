@@ -1,4 +1,7 @@
-﻿# Creates the BUILD.lnk shortcut that builds the OLED font tool.
+﻿# SPDX-License-Identifier: Apache-2.0
+# Copyright (c) 2026 zhangwtee <https://github.com/zhangwtee>
+# 本文件属于「OLED 点阵取模工具」。改动请保留以上两行并注明改了什么（Apache-2.0 §4b）。
+# Creates the BUILD.lnk shortcut that builds the OLED font tool.
 #
 # ASCII only: Windows PowerShell 5.1 reads BOM-less UTF-8 files as the system
 # ANSI codepage (GBK on this machine), which would mangle any non-ASCII text

@@ -63,12 +63,30 @@
  *      #define BLINK_WRITE_DATA(d)  OLED_WR_Byte((d), 0)
  *
  *  有些工程把这两个函数只写在 .c 里、没在 .h 里声明，在自己文件里
- *  调用会报未声明。把这两行补进对应的 .h 即可：
- *      void OLED_WriteCommand(uint8_t cmd);
- *      void OLED_WriteData(uint8_t dat);
+ *  调用会报 #223-D: function declared implicitly。本文件在下面替它们
+ *  补了声明，一般不用管；类型对不上就把 OLED_DRIVER_DECL 改成 0。
  * ============================================================ */
 #define BLINK_WRITE_CMD(c)    OLED_WriteCommand(c)
 #define BLINK_WRITE_DATA(d)   OLED_WriteData(d)
+
+/* 驱动函数的原型声明。
+ *
+ * 不少例程把 OLED_WriteCommand() / OLED_WriteData() 只写在驱动 .c 里、没在 .h 里导出，
+ * 上面那些宏展开后编译器没见过这些名字，就报
+ *     warning: #223-D: function "..." declared implicitly
+ * 这里替你补上，不用去改驱动头文件。
+ *
+ * 下面三种情况把它关掉（改成 0）：
+ *   1) 驱动里这些函数的参数类型不是 uint8_t —— 声明和定义对不上会报 error
+ *   2) 它们是 static 函数，或者是宏
+ *   3) 你就想自己维护这份声明
+ */
+#define OLED_DRIVER_DECL                  1
+
+#if OLED_DRIVER_DECL
+void OLED_WriteCommand(uint8_t);
+void OLED_WriteData(uint8_t);
+#endif
 
 /* 帧间延时：HAL_Delay(ms) / vTaskDelay(pdMS_TO_TICKS(ms)) / Delay_ms(ms) */
 #define BLINK_DELAY(ms)       HAL_Delay(ms)

@@ -568,14 +568,14 @@ QString ImageGen::renderHeader(const QVector<QVector<quint8>> &frames,
     s += QStringLiteral(" *      #define ANIM_WRITE_DATA(d)  OLED_WR_Byte((d), 0)\n");
     s += QStringLiteral(" *\n");
     s += QStringLiteral(" *  有些工程把这两个函数只写在 .c 里、没在 .h 里声明，在自己文件里\n");
-    s += QStringLiteral(" *  调用会报未声明。把这两行补进对应的 .h 即可：\n");
-    s += QStringLiteral(" *      void OLED_WriteCommand(uint8_t cmd);\n");
-    s += QStringLiteral(" *      void OLED_WriteData(uint8_t dat);\n");
+    s += QStringLiteral(" *  调用会报 #223-D: function declared implicitly。本文件在下面替它们\n");
+    s += QStringLiteral(" *  补了声明，一般不用管；类型对不上就把 OLED_DRIVER_DECL 改成 0。\n");
     s += QStringLiteral(" * ============================================================ */\n");
     /* 适配区按工程源码填（LibProbe 探出来的）；探不出来还是老默认值 */
     s += LibProbe::adapterNote(adapter);
     s += QStringLiteral("#define ANIM_WRITE_CMD(c)    %1\n").arg(adapter.writeCmd);
     s += QStringLiteral("#define ANIM_WRITE_DATA(d)   %1\n\n").arg(adapter.writeData);
+    s += LibProbe::driverDeclBlock(adapter, QStringLiteral("OLED_DRIVER_DECL"));
     s += QStringLiteral("/* 帧间延时：HAL_Delay(ms) / vTaskDelay(pdMS_TO_TICKS(ms)) / Delay_ms(ms) */\n");
     s += QStringLiteral("#define ANIM_DELAY(ms)       %1\n\n").arg(adapter.delayCall);
     s += QStringLiteral("/* 屏是 SH1106（显存 132 列，可见区从第 2 列开始）时是 2，SSD1306 是 0。\n");
@@ -787,14 +787,14 @@ QString ImageGen::renderMultiHeader(const QVector<Asset> &assets, const QString 
     s += QStringLiteral(" *      #define OLED_WRITE_DATA(d)  OLED_WR_Byte((d), 0)\n");
     s += QStringLiteral(" *\n");
     s += QStringLiteral(" *  有些工程把这两个函数只写在 .c 里、没在 .h 里声明，在自己文件里\n");
-    s += QStringLiteral(" *  调用会报未声明。把这两行补进对应的 .h 即可：\n");
-    s += QStringLiteral(" *      void OLED_WriteCommand(uint8_t cmd);\n");
-    s += QStringLiteral(" *      void OLED_WriteData(uint8_t dat);\n");
+    s += QStringLiteral(" *  调用会报 #223-D: function declared implicitly。本文件在下面替它们\n");
+    s += QStringLiteral(" *  补了声明，一般不用管；类型对不上就把 OLED_DRIVER_DECL 改成 0。\n");
     s += QStringLiteral(" * ============================================================ */\n");
     /* 适配区按工程源码填（LibProbe 探出来的）；探不出来还是老默认值 */
     s += LibProbe::adapterNote(adapter);
     s += QStringLiteral("#define OLED_WRITE_CMD(c)    %1\n").arg(adapter.writeCmd);
     s += QStringLiteral("#define OLED_WRITE_DATA(d)   %1\n\n").arg(adapter.writeData);
+    s += LibProbe::driverDeclBlock(adapter, QStringLiteral("OLED_DRIVER_DECL"));
     s += QStringLiteral("/* 帧间延时：HAL_Delay(ms) / vTaskDelay(pdMS_TO_TICKS(ms)) / Delay_ms(ms) */\n");
     s += QStringLiteral("#define OLED_DELAY(ms)       %1\n\n").arg(adapter.delayCall);
     s += QStringLiteral("#if defined(__GNUC__)\n");

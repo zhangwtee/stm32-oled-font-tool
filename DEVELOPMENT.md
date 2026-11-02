@@ -107,8 +107,7 @@ PowerShell 顺序执行，把 `Say` 这类自定义函数的调用写在定义�
 
 三条必须守住：
 
-1. **排除工具自己的目录** —— 跑过 `build_cfont.py` / `add_chars.py` 之后，
-   `oledfonttool\src` 里会有一份 `OLED_CFont.h`（生成物，已在 `.gitignore` 里），
+1. **排除工具自己的目录** —— `oledfonttool\src` 里有 `OLED_CFont.h` 样例，
    `pctest` 里也有 `OLED.c`，不排除就会把自己当工程。
 2. **多个工程时不能暗中选择** —— 界面必须写出"这一层还有 N 个工程：…"，
    否则用户会发现字库莫名其妙进了别人的工程。

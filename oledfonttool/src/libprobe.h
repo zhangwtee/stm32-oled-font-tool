@@ -183,6 +183,24 @@ CodeAdapter adapterOf(const Result &r);
  */
 QString adapterNote(const CodeAdapter &a);
 
+/*
+ * 适配区那几个宏底下要跟的一段「驱动函数原型声明」。
+ *
+ * 很多例程把 OLED_WriteCommand / OLED_WriteData 只定义在 .c 里、没在 .h 导出，
+ * 生成的头文件一调用，armcc 就报
+ *      warning: #223-D: function "OLED_WriteCommand" declared implicitly
+ * 这里按宏体认出函数名和参数个数，补两份 void f(uint8_t); 出来，
+ * 用户就不用去翻驱动头文件了。
+ *
+ * macroName 是给用户留的关断开关（定义成 0 就整段不生效）。两套头文件各用
+ * 一个名字：字库用 CF_DRIVER_DECL，素材包用 OLED_DRIVER_DECL —— 同一个工程
+ * 里两份都包含时不会互相干扰。
+ *
+ * 宏体不是朴素函数调用（带 & 、-> 、数组下标）时返回空串：那种情况猜出来的
+ * 原型一定是错的，会把一条警告换成一条 error。
+ */
+QString driverDeclBlock(const CodeAdapter &a, const QString &macroName);
+
 }   // namespace LibProbe
 
 #endif   // LIBPROBE_H

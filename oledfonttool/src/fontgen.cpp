@@ -521,12 +521,14 @@ QString FontGen::generateHeader(const QString &text, QString *errorOut, int colO
 	                  .arg(skipped4)
 	        : QString();
 
-	/* 文件头里给一条真能跑起来的调用示例，用本库的第一个字。
-	 * 不写死「温度」这类字：它们未必在眼前这份字库里，照着抄反而显示不出来，
-	 * 那比不给示例更糟。 */
-	const QString sampleCall = QStringLiteral(
-	        "OLED_CFont_ShowString(1, 1, %1);   /* 显示「%2」 */")
-	        .arg(cLiteralOf(chars[0]), QString(chars[0]));
+	/* 文件头里的示例只给一条，用本库的第一个字（chars[0] 已经是排序后的
+	 * 第一个，和文件里第一行字模是同一个字，对着看不会对不上）。 */
+	const QString sampleCall = QStringLiteral("OLED_CFont_ShowString(1, 1, %1);")
+	        .arg(cLiteralOf(chars[0]));
+	const QString sampleBlock = QStringLiteral(
+	        " *        %1\n"
+	        " *        这一行显示的是「%2」，也就是本库的第一个字。\n")
+	        .arg(sampleCall, QString(chars[0]));
 
 	/* 出处标记放在最前面：字模离开这个工具之后，只有这行能说明它从哪来 */
 	QString out = Watermark::text();
@@ -537,6 +539,14 @@ QString FontGen::generateHeader(const QString &text, QString *errorOut, int colO
 		"/*==============================================================================\n"
 		" *  汉字字模库  %1x%1 点阵，每个汉字 %2 字节\n"
 		" *\n"
+		" *  三步用起来：\n"
+		" *      1) 本文件放进工程，main.c 里 #include \"OLED_CFont.h\"\n"
+		" *      2) 把下面【适配区】的 CF_WRITE_CMD / CF_WRITE_DATA 改成你驱动里的\n"
+		" *         写命令、写数据函数名\n"
+		" *      3) 把下面这段复制到 main() 里，编译烧录\n"
+		" *\n"
+		"%7"
+		" *\n"
 		" *  取模格式（与 OLED.c 的 OLED_ShowChinese 对应）：\n"
 		" *      阴码 / 列行式 / 逆向(低位在前) / C51格式\n"
 		"%6"
@@ -544,10 +554,6 @@ QString FontGen::generateHeader(const QString &text, QString *errorOut, int colO
 		" *\n"
 		" *  每行的排布：前 3 字节是该字的 UTF-8 编码，后面 %2 字节是点阵，\n"
 		" *  所以字库里一行是 %4 字节。\n"
-		" *\n"
-		" *  这里全部写成十六进制字节，汉字只放在注释里——因为把字符串字面量\n"
-		" *  (\"\\xNN\\xNN\\xNN\") 和字节混在同一个初始化列表里，从第二行起编译器会\n"
-		" *  把字符串当成指针值，报 initializer element is not computable at load time。\n"
 		" *\n"
 		" *  注意：本文件必须是 UTF-8 编码保存（Keil 里 Edit -> Configuration ->\n"
 		" *        Encoding 选 UTF-8）。\n"
@@ -568,10 +574,8 @@ QString FontGen::generateHeader(const QString &text, QString *errorOut, int colO
 		"#define OLED_CFONT_STRIDE  %4\n"
 		"\n"
 		"/* 汉字码表：每行 %4 字节 = UTF-8 三字节编码 + %1x%1 点阵(%2 字节)。\n"
-		"   每个字后面的注释里带着这个字的 C 字符串。显示时填进显示函数即可，\n"
-		"   比如本库的第一个字：\n"
-		"       %7\n"
-		"   要显示几个字，把各字的串接起来拼成一句。 */\n"
+		"   每行注释是「这个字 + 它的 C 字符串」，要显示哪个字就复制哪个，\n"
+		"   多个字接起来拼成一句。按 UTF-8 编码排序。 */\n"
 		"const uint8_t %5[][%4] =\n"
 		"{\n")
 		.arg(S)
@@ -580,7 +584,7 @@ QString FontGen::generateHeader(const QString &text, QString *errorOut, int colO
 		.arg(stride)
 		.arg(tbl)
 		.arg(invNote + skipNote)
-		.arg(sampleCall);
+		.arg(sampleBlock);
 
 	for (int i = 0; i < n; ++i)
 	{
@@ -659,10 +663,9 @@ QString FontGen::generateHeader(const QString &text, QString *errorOut, int colO
  *      #define CF_WRITE_CMD(c)   OLED_WR_Byte((c), 1)
  *      #define CF_WRITE_DATA(d)  OLED_WR_Byte((d), 0)
  *
- *  有些工程把这两个函数只写在 .c 里、没在 .h 声明，在自己文件里调用会报
- *  未声明。把这两行补进对应的 .h 即可：
- *      void OLED_WriteCommand(uint8_t cmd);
- *      void OLED_WriteData(uint8_t dat);
+ *  有些工程把这两个函数只写在 .c 里、没在 .h 声明，调用时会报
+ *  #223-D: function declared implicitly。本文件在下面替它们补了声明，
+ *  一般不用管；真碰上类型对不上，把 CF_DRIVER_DECL 改成 0 就行。
  *
  *  CF_SHOW_ASCII 用来显示英文字符。没有自己的字符显示函数就改成
  *      #define CF_SHOW_ASCII(line, col, ch)  ((void)0)
@@ -678,6 +681,7 @@ QString FontGen::generateHeader(const QString &text, QString *errorOut, int colO
 	out += QStringLiteral("#define CF_WRITE_CMD(c)                 %1\n").arg(adapter.writeCmd);
 	out += QStringLiteral("#define CF_WRITE_DATA(d)                %1\n").arg(adapter.writeData);
 	out += QStringLiteral("#define CF_SHOW_ASCII(line, col, ch)    %1\n\n").arg(adapter.showAscii);
+	out += LibProbe::driverDeclBlock(adapter, QStringLiteral("CF_DRIVER_DECL"));
 
 	out += QStringLiteral(R"CF(/* 屏是 SH1106（显存 132 列，可见区从第 2 列开始）时是 2，SSD1306 是 0。
    这个值是导出时按驱动源码自动判断后填进来的，一般不用改；

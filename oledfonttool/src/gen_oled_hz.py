@@ -146,10 +146,9 @@ SHOW_FUNC_TAIL = r"""
  *      #define CF_WRITE_CMD(c)   OLED_WR_Byte((c), 1)
  *      #define CF_WRITE_DATA(d)  OLED_WR_Byte((d), 0)
  *
- *  有些工程把这两个函数只写在 .c 里、没在 .h 声明，在自己文件里调用会报
- *  未声明。把这两行补进对应的 .h 即可：
- *      void OLED_WriteCommand(uint8_t cmd);
- *      void OLED_WriteData(uint8_t dat);
+ *  有些工程把这两个函数只写在 .c 里、没在 .h 声明，调用时会报
+ *  #223-D: function declared implicitly。本文件在下面替它们补了声明，
+ *  一般不用管；真碰上类型对不上，把 CF_DRIVER_DECL 改成 0 就行。
  *
  *  CF_SHOW_ASCII 用来显示英文字符。没有自己的字符显示函数就改成
  *      #define CF_SHOW_ASCII(line, col, ch)  ((void)0)
@@ -158,6 +157,25 @@ SHOW_FUNC_TAIL = r"""
 #define CF_WRITE_CMD(c)                 OLED_WriteCommand(c)
 #define CF_WRITE_DATA(d)                OLED_WriteData(d)
 #define CF_SHOW_ASCII(line, col, ch)    OLED_ShowChar((line), (col), (ch))
+
+/* 驱动函数的原型声明。
+ *
+ * 不少例程把 OLED_WriteCommand() / OLED_WriteData() 只写在驱动 .c 里、没在 .h 里导出，
+ * 上面那些宏展开后编译器没见过这些名字，就报
+ *     warning: #223-D: function "..." declared implicitly
+ * 这里替你补上，不用去改驱动头文件。
+ *
+ * 下面三种情况把它关掉（改成 0）：
+ *   1) 驱动里这些函数的参数类型不是 uint8_t —— 声明和定义对不上会报 error
+ *   2) 它们是 static 函数，或者是宏
+ *   3) 你就想自己维护这份声明
+ */
+#define CF_DRIVER_DECL                  1
+
+#if CF_DRIVER_DECL
+void OLED_WriteCommand(uint8_t);
+void OLED_WriteData(uint8_t);
+#endif
 
 /* 屏是 SH1106（显存 132 列，可见区从第 2 列开始）时改成 2，SSD1306 保持 0 */
 #define CF_COL_OFFSET                   0

@@ -4111,39 +4111,41 @@ void MainWindow::exportHeader(bool askForPath)
 	 * 数组名变了，查表的步长也变了。这里必须说清楚，否则屏幕上会错位。 */
 	const QString sizeNote = (m_gen.size() == 16)
 		? QString()
-		: QStringLiteral("\n\n注意：这次导出的是 %1×%1 字库，数组名是 %2。\n"
-		                 "驱动里原来写死的 16 / 32 要换成文件开头的\n"
-		                 "OLED_CFONT_W / H / BYTES / STRIDE 这几个宏，\n"
-		                 "否则字会错位或只显示一部分。")
+		: QStringLiteral("\n\n这次是 %1×%1 字库，数组名 %2 —— 驱动里写死的 16/32 要换成"
+		                 "文件开头的 OLED_CFONT_W / H / BYTES / STRIDE。")
 		  .arg(m_gen.size())
 		  .arg(FontGen::tableName(m_gen.size()));
 
-	/* 弹窗里的示例也用当前输入的第一个字，和头文件里那条保持一致。
-	 * 写死一个不一定在字库里的字，用户照着抄反而显示不出来。 */
-	const QVector<QChar> glyphs = FontGen::glyphChars(m_text->toPlainText());
-	const QString sampleCall = glyphs.isEmpty()
-		? QString()
-		: QStringLiteral("    OLED_CFont_ShowString(1, 1, %1);")
-		  .arg(FontGen::cLiteral(glyphs.first()));
+	/* 弹窗只交代两件事：写到哪、下一步是"把头文件加进工程"。
+	 *
+	 * 这里不再摆那条调用。摆出来就得跟着改字号、改屏高、改输入的重新算，
+	 * 而且用户真正缺的不是一行代码 —— 是"这个文件放进工程之后怎么用"，
+	 * 那件事写在头文件开头，跟着文件走，比跟着弹窗靠谱。 */
+	QMessageBox box(this);
+	box.setWindowTitle(QStringLiteral("导出成功"));
+	box.setIcon(QMessageBox::Information);
+	box.setText(QStringLiteral("已写入：\n%1\n\n%2×%2 点阵，汉字 %3 个，%4 字节。%5")
+	            .arg(m_headerPath)
+	            .arg(m_gen.size())
+	            .arg(m_preview->glyphCount())
+	            .arg(totalBytes)
+	            .arg(sizeNote));
+	box.setInformativeText(QStringLiteral(
+	        "下一步：把这个头文件加入工程（Keil：Project → Add Existing Files）。\n\n"
+	        "用法和一条完整示例都写在头文件开头，照着改一下就行。\n"
+	        "点「加入工程」，工具会顺手把 #include、驱动头里的函数声明、"
+	        "适配区那几个宏一起填掉。\n\n"
+	        "【注意】头文件必须以 UTF-8 保存，否则注释里的汉字在 Keil 里是乱码。"));
 
-	QMessageBox::information(this, QStringLiteral("导出成功"),
-	                         QStringLiteral("已写入：\n%1\n\n%2×%2 点阵，汉字 %3 个，%4 字节\n"
-	                                        "在 Keil 里 Rebuild 即可生效。%5\n\n"
-	                                        "头文件里已带 OLED_CFont_ShowString()，"
-	                                        "工程里没有中文显示函数也能直接用：\n"
-	                                        "把文件里【适配区】的宏指向你的写命令、写数据函数，"
-	                                        "然后调用\n"
-	                                        "    OLED_CFont_ShowString(行, 列, \"要显示的文字\");\n\n"
-	                                        "每个字的 C 字符串也写在头文件里——就在它点阵上面那行注释，\n"
-	                                        "显示哪个字就用哪个字的，多个字接起来拼成一句，例如：\n"
-	                                        "%6\n"
-	                                        "头文件开头还有一条同样格式的示例。")
-	                         .arg(m_headerPath)
-	                         .arg(m_gen.size())
-	                         .arg(m_preview->glyphCount())
-	                         .arg(totalBytes)
-	                         .arg(sizeNote)
-	                         .arg(sampleCall));
+	QPushButton *mergeBtn = box.addButton(QStringLiteral("加入工程…"),
+	                                      QMessageBox::ActionRole);
+	box.addButton(QStringLiteral("完成"), QMessageBox::AcceptRole);
+	box.exec();
+
+	if (box.clickedButton() == mergeBtn)
+	{
+		mergeIntoProject();
+	}
 
 	/* 导出成功后顺便检查一下工程源码的编码。
 	 * 编码不一致时字库能写进去、Keil 也能编译，但屏幕上不会显示汉字，

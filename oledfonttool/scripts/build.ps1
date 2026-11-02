@@ -1,4 +1,7 @@
-﻿# OLED 点阵取模工具 —— 构建脚本
+﻿# SPDX-License-Identifier: Apache-2.0
+# Copyright (c) 2026 zhangwtee <https://github.com/zhangwtee>
+# 本文件属于「OLED 点阵取模工具」。改动请保留以上两行并注明改了什么（Apache-2.0 §4b）。
+# OLED 点阵取模工具 —— 构建脚本
 #
 # 双击本文件即可构建（.ps1 的文件关联是好的，不像 .bat/.cmd 在你机器上被改坏了）。
 # 也可以在命令行里跑： powershell -ExecutionPolicy Bypass -File build.ps1
