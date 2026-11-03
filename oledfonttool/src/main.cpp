@@ -900,8 +900,9 @@ void MainWindow::buildUi()
 	QWidget *side = new QWidget(this);
 	side->setObjectName(QStringLiteral("SidePanel"));
 	/* 不要用 setFixedWidth：固定宽度会让分隔线拖不动。
-	 * 给个最小宽度让内容不挤，剩下的交给 QSplitter —— 用户可以自由拖动。 */
-	side->setMinimumWidth(320);
+	 * 给个最小宽度让内容不挤，剩下的交给 QSplitter —— 用户可以自由拖动。
+	 * 150 只是"别挤成一条线"的下限，再大就会把窗口能缩到的最小宽度顶上去。 */
+	side->setMinimumWidth(150);
 	side->setSizePolicy(QSizePolicy::Preferred, QSizePolicy::Preferred);
 
 	QVBoxLayout *sideLayout = new QVBoxLayout(side);
@@ -922,15 +923,18 @@ void MainWindow::buildUi()
 	m_subTitle = new QLabel(side);
 	m_subTitle->setObjectName(QStringLiteral("SubTitle"));
 	sideLayout->addWidget(title);
-	sideLayout->addWidget(purpose);
-	sideLayout->addWidget(m_subTitle);
 
 	/* 四个分组叠起来比 1080p 还高一点，窗口一缩小最下面的按钮就掉出去了。
-	 * 所以中间这一段放滚动区；编码状态和字数统计固定在底部，不跟着滚。 */
+	 * 所以中间这一段放滚动区；标题留在外面，其余（用途说明、参数副标题、
+	 * 编码状态、字数统计、仓库链接）都跟着滚 —— 只有标题固定，窗口才能
+	 * 一路缩到很小，不会缩到一半就被这几行字顶住。 */
 	QWidget *inner = new QWidget(side);
 	QVBoxLayout *innerLayout = new QVBoxLayout(inner);
 	innerLayout->setContentsMargins(0, 0, 0, 0);
 	innerLayout->setSpacing(10);
+
+	innerLayout->addWidget(purpose);
+	innerLayout->addWidget(m_subTitle);
 
 	/* ---- 取模设置 ---- */
 	QGroupBox *boxSet = new QGroupBox(QStringLiteral("取模设置"), side);
@@ -1183,23 +1187,18 @@ void MainWindow::buildUi()
 	connect(mergeBtn, &QPushButton::clicked, this, &MainWindow::mergeIntoProject);
 
 	innerLayout->addWidget(boxOut);
-	innerLayout->addStretch(1);
-
-	QScrollArea *sideScroll = new QScrollArea(side);
-	sideScroll->setWidget(inner);
-	sideScroll->setWidgetResizable(true);
-	sideScroll->setFrameShape(QFrame::NoFrame);
-	sideScroll->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
-	sideLayout->addWidget(sideScroll, 1);
 
 	/* 源码编码检查结果。
 	 * 单独放一个标签，因为它关系到"字库能不能被查到"，比普通状态重要。
-	 * 放在滚动区外面：窗口再小也要能一眼看到。 */
+	 * 以前放在滚动区外面（想着窗口再小也能一眼看到），代价是这几行固定高度
+	 * 把窗口最小高度顶死在 300 多，用户拖上下边框只能缩一点点。
+	 * 现在统一放进滚动区：窗口够大时一样全看得见，缩到很小时跟着滚，
+	 * 换来的是窗口能一路拖到很小。 */
 	m_encStatus = new QLabel(side);
 	m_encStatus->setObjectName(QStringLiteral("Hint"));
 	m_encStatus->setWordWrap(true);
 	m_encStatus->setMinimumWidth(1);
-	sideLayout->addWidget(m_encStatus);
+	innerLayout->addWidget(m_encStatus);
 
 	m_status = new QLabel(side);
 	m_status->setObjectName(QStringLiteral("Hint"));
@@ -1244,10 +1243,22 @@ void MainWindow::buildUi()
 	statusBox->setSpacing(2);
 	statusBox->addWidget(m_status);
 	statusBox->addLayout(flashRow);
-	sideLayout->addLayout(statusBox);
+	innerLayout->addLayout(statusBox);
 
-	/* 仓库地址：放在最底部，跟上面一堆状态/容量分隔开。 */
-	sideLayout->addWidget(makeRepoLinks(side));
+	/* 仓库地址：放在最底部，跟上面一堆状态/容量分隔开。
+	 * 同样进滚动区 —— 见上面 m_encStatus 那段说明。 */
+	innerLayout->addWidget(makeRepoLinks(side));
+	innerLayout->addStretch(1);
+
+	QScrollArea *sideScroll = new QScrollArea(side);
+	sideScroll->setWidget(inner);
+	sideScroll->setWidgetResizable(true);
+	sideScroll->setFrameShape(QFrame::NoFrame);
+	/* 原来这里是 AlwaysOff。窗口被拖到 300 像素宽时左栏挤不下，一行字会被
+	 * 右边切掉且没有任何提示；改成按需要出现，至少还能横向滚过去看全。 */
+	sideScroll->setHorizontalScrollBarPolicy(Qt::ScrollBarAsNeeded);
+	sideLayout->addWidget(sideScroll, 1);
+
 	connect(m_flashBox, &QComboBox::currentIndexChanged, this, [this]() {
 		updateStatus();
 		updateImageInfo();          /* 图片页那句「放不下几秒」也跟着变 */
@@ -1356,7 +1367,7 @@ QWidget *MainWindow::buildImagePage()
 {
 	QWidget *side = new QWidget(this);
 	side->setObjectName(QStringLiteral("SidePanel"));
-	side->setMinimumWidth(300);
+	side->setMinimumWidth(150);
 	side->setSizePolicy(QSizePolicy::Preferred, QSizePolicy::Preferred);
 
 	QVBoxLayout *sideLayout = new QVBoxLayout(side);
@@ -1366,6 +1377,15 @@ QWidget *MainWindow::buildImagePage()
 	QLabel *title = new QLabel(QStringLiteral("图片 / 动画取模"), side);
 	title->setObjectName(QStringLiteral("Title"));
 	sideLayout->addWidget(title);
+
+	/* 下面的分组框整体套一层滚动区。不套的话：素材 + 取模设置两块自然高度
+	 * 就有 700 多，最小高度会把整个窗口顶到 817，900 高的副屏上窗口缩不下来，
+	 * 用户拖上下边框完全没反应。和文字页 SidePanel 是同一套做法，
+	 * 底部那几个按钮和仓库链接留在滚动区外面，窗口再小也能点到。 */
+	QWidget *inner = new QWidget(side);
+	QVBoxLayout *innerLayout = new QVBoxLayout(inner);
+	innerLayout->setContentsMargins(0, 0, 0, 0);
+	innerLayout->setSpacing(10);
 
 	QGroupBox *boxFile = new QGroupBox(QStringLiteral("素材"), side);
 	QVBoxLayout *fileLayout = new QVBoxLayout(boxFile);
@@ -1419,7 +1439,7 @@ QWidget *MainWindow::buildImagePage()
 	m_imgFileLabel->setWordWrap(true);
 	fileLayout->addWidget(m_imgFileLabel);
 
-	sideLayout->addWidget(boxFile);
+	innerLayout->addWidget(boxFile);
 
 	QGroupBox *boxOpt = new QGroupBox(QStringLiteral("取模设置"), side);
 	QFormLayout *form = new QFormLayout(boxOpt);
@@ -1467,15 +1487,13 @@ QWidget *MainWindow::buildImagePage()
 	    "logo、图标这类深色背景的图，反白后更省电、也更清楚。"));
 	form->addRow(QString(), m_imgInvert);
 
-	sideLayout->addWidget(boxOpt);
+	innerLayout->addWidget(boxOpt);
 
 	m_imgInfo = new QLabel(side);
 	m_imgInfo->setObjectName(QStringLiteral("Hint"));
 	m_imgInfo->setWordWrap(true);
 	m_imgInfo->setMinimumWidth(1);
-	sideLayout->addWidget(m_imgInfo);
-
-	sideLayout->addStretch(1);
+	innerLayout->addWidget(m_imgInfo);
 
 	QHBoxLayout *btnRow = new QHBoxLayout();
 	m_imgPlayBtn = new QPushButton(QStringLiteral("播放"), side);
@@ -1484,19 +1502,19 @@ QWidget *MainWindow::buildImagePage()
 	exportBtn->setToolTip(QStringLiteral("只导出列表里选中的这一份素材"));
 	btnRow->addWidget(m_imgPlayBtn);
 	btnRow->addWidget(exportBtn);
-	sideLayout->addLayout(btnRow);
+	innerLayout->addLayout(btnRow);
 
 	QPushButton *exportAllBtn = new QPushButton(QStringLiteral("全部导出…（每份一个 .h）"), side);
 	exportAllBtn->setToolTip(QStringLiteral(
 		"选一个目录，列表里每份素材各写一个 <名字>.h。\n"
 		"文件名和里面的宏、数组名都按素材名区分，可以同时 include 进一个工程。"));
-	sideLayout->addWidget(exportAllBtn);
+	innerLayout->addWidget(exportAllBtn);
 
 	QPushButton *exportPackBtn = new QPushButton(QStringLiteral("全部存进一个 .h…"), side);
 	exportPackBtn->setToolTip(QStringLiteral(
 		"把列表里所有素材写进同一个头文件，但每份仍然是独立的宏、数组和显示函数\n"
 		"（不合成一个动画）。每份点阵上方会注明导入时的文件名。"));
-	sideLayout->addWidget(exportPackBtn);
+	innerLayout->addWidget(exportPackBtn);
 
 	/* 和文字页那个「一键接入工程」是同一套（补声明 / 补 include / 补示例 / 可撤销），
 	 * 只是接的是素材包头，示例换成「刷第 0 帧」 */
@@ -1505,10 +1523,20 @@ QWidget *MainWindow::buildImagePage()
 		"把上次导出的素材包头接进工程：驱动头补函数声明、main.c 补 #include，\n"
 		"再补一行「刷第 0 帧」的调用（插在 OLED_Init 之后，不动 while 循环）。\n"
 		"只插入不改已有行，写盘前能逐条预览，每个文件留 .oledbak 可撤销。"));
-	sideLayout->addWidget(mergeAssetBtn);
+	innerLayout->addWidget(mergeAssetBtn);
 
-	/* 仓库地址：和文字页一样放最底部。 */
-	sideLayout->addWidget(makeRepoLinks(side));
+	/* 仓库地址：和文字页一样放最底部。
+	 * 和文字页一样，按钮和链接都进滚动区 —— 留在外面的话它们的高度会变成
+	 * 窗口的最小高度，窗口就缩不小。 */
+	innerLayout->addWidget(makeRepoLinks(side));
+	innerLayout->addStretch(1);
+
+	QScrollArea *sideScroll = new QScrollArea(side);
+	sideScroll->setWidget(inner);
+	sideScroll->setWidgetResizable(true);
+	sideScroll->setFrameShape(QFrame::NoFrame);
+	sideScroll->setHorizontalScrollBarPolicy(Qt::ScrollBarAsNeeded);
+	sideLayout->addWidget(sideScroll, 1);
 
 	/* 右侧预览 */
 	m_imgPreview = new ImagePreview(this);
@@ -1516,7 +1544,9 @@ QWidget *MainWindow::buildImagePage()
 	scroll->setWidget(m_imgPreview);
 	scroll->setWidgetResizable(true);
 	scroll->setFrameShape(QFrame::NoFrame);
-	scroll->setMinimumWidth(320);
+	/* 110 是"还能看出点阵是点阵"的底线。这个值直接决定窗口能缩到多窄：
+	 *  侧栏 150 + 这里 110 + 分隔条 ≈ 280，再往上调用户拖两下边框就到头了。 */
+	scroll->setMinimumWidth(110);
 
 	QSplitter *splitter = new QSplitter(Qt::Horizontal, this);
 	splitter->addWidget(side);

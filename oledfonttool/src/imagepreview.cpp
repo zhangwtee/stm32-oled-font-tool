@@ -21,7 +21,10 @@ ImagePreview::ImagePreview(QWidget *parent)
     /* 不带"一张"：现在既能选单张也能一次多选，占位文字别把用户框住 */
     m_emptyText = QStringLiteral("选择图片后，这里显示实际会烧进 Flash 的点阵");
 
-    setMinimumSize(240, 160);
+    /* 最小尺寸只保证"还能看出这是块屏"。以前是 240x160，把整个窗口能缩到的
+     * 最小高度顶在 200 以上，用户拖上下边框两下就到底了。真放不下时外层
+     * 滚动区会接管，内容不会丢。 */
+    setMinimumSize(120, 80);
     setAutoFillBackground(false);
 }
 
@@ -34,9 +37,9 @@ void ImagePreview::setFrames(const QVector<QImage> &monoFrames, int delayMs)
     if (!m_frames.isEmpty())
     {
         m_cell = m_frames.first().size();
-        /* 高度固定后，让布局知道我们希望多大 */
-        const int wantH = m_cell.height() * 6;
-        setMinimumHeight(qMax(160, wantH));
+        /* 这里不 setMinimumHeight(素材高 x 6)。那样算出来是 384（128x64 的图），
+         * 窗口高度又被顶住拖不动了。想要大点就自己拖大，放不下时滚动区接管。 */
+        updateGeometry();
     }
     else
     {
@@ -50,7 +53,7 @@ void ImagePreview::clearFrames()
     m_frames.clear();
     m_current = 0;
     m_cell = QSize();
-    setMinimumHeight(160);
+    setMinimumHeight(80);
     update();
 }
 
@@ -85,7 +88,7 @@ QSize ImagePreview::sizeHint() const
 
 QSize ImagePreview::minimumSizeHint() const
 {
-    return QSize(240, 120);
+    return QSize(120, 80);
 }
 
 void ImagePreview::paintEvent(QPaintEvent *event)

@@ -17,7 +17,9 @@
 FontPreview::FontPreview(QWidget *parent)
 	: QWidget(parent), m_gen(nullptr), m_gap(18)
 {
-	setMinimumSize(360, 260);
+	/* 这里不设 setMinimumSize。它的优先级高于 minimumSizeHint()，一设就把
+	 * 窗口的最小尺寸锁死 —— 原来写的 360x260 意味着窗口窄于 360 就拖不动，
+	 * 用户拖两下边框就到头了。最小尺寸统一由下面的 minimumSizeHint() 决定。 */
 	QPalette pal = palette();
 	pal.setColor(QPalette::Window, QColor(0xF7, 0xF8, 0xFA));
 	setAutoFillBackground(true);
@@ -76,7 +78,9 @@ QSize FontPreview::sizeHint() const
 
 QSize FontPreview::minimumSizeHint() const
 {
-	return QSize(200, 200);
+	/* 只保证"还看得见格子"。以前是 200x200，等于给整个窗口安了个 200 高的
+	 * 地板，用户拖上下边框拖到一半就到底了。放不下时外层滚动区会接管。 */
+	return QSize(120, 80);
 }
 
 void FontPreview::resizeEvent(QResizeEvent *event)
