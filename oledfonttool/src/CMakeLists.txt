@@ -25,25 +25,20 @@ endif()
 find_package(Qt6 REQUIRED COMPONENTS Widgets)
 
 # ---- 构建指纹 ----
-# 把「配置时的提交号」和「配置日期」编进 exe。界面上不显示、也不写盘，
-# 只留在这份二进制里，用来回答一个很实际的问题：手里这个 oledmatrix.exe
-# 到底是哪次提交、什么时候编出来的。
+# 把「版本号」和「配置日期」编进 exe。界面上不显示、也不写盘，只留在这份
+# 二进制里，用来回答一个很实际的问题：手里这个 oledmatrix.exe 是哪个版本、
+# 什么时候编出来的。
 #
-# 课堂目录那份源码没有 .git，git 会一路往上找不到仓库；取不到就写 local，
-# 编译照常。想刷新这个值，重新跑一次 cmake 配置即可。
-set(OMX_GIT_COMMIT "local")
-execute_process(
-    COMMAND git rev-parse --short HEAD
-    WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
-    OUTPUT_VARIABLE _omx_commit
-    OUTPUT_STRIP_TRAILING_WHITESPACE
-    RESULT_VARIABLE _omx_rc
-    ERROR_QUIET)
-if(_omx_rc EQUAL 0 AND _omx_commit)
-    set(OMX_GIT_COMMIT "${_omx_commit}")
+# 版本号从 app.rc 的 FileVersion "x.y.z" 读，跟资源里、installer 里同源，
+# 不依赖 .git——课堂目录那份没有 .git 也能取到。想刷新日期，重新跑一次
+# cmake 配置即可（版本号改了 .rc 也要重配置一次才会生效）。
+set(OMX_VERSION "0.0.0")
+file(READ "${CMAKE_CURRENT_SOURCE_DIR}/app.rc" _omx_rc)
+if(_omx_rc MATCHES "FileVersion\"?[ \t]*,[ \t]*\"([0-9.]+)\"")
+    set(OMX_VERSION "${CMAKE_MATCH_1}")
 endif()
 string(TIMESTAMP OMX_BUILD_DATE "%Y-%m-%d")
-message(STATUS "build stamp: ${OMX_GIT_COMMIT} ${OMX_BUILD_DATE}")
+message(STATUS "build stamp: v${OMX_VERSION} ${OMX_BUILD_DATE}")
 configure_file(omxbuild.h.in ${CMAKE_CURRENT_BINARY_DIR}/omxbuild.h @ONLY)
 
 qt_add_executable(oledmatrix

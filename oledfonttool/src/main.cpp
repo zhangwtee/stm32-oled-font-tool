@@ -4390,14 +4390,14 @@ int main(int argc, char *argv[])
 	/* 构建标记：不显示、不写盘，只作为属性挂在 QApplication 上。
 	 *
 	 * 目的很窄：让这行字留在 exe 的只读数据里。日后手边出现一个来路不明的
-	 * oledmatrix.exe，查一下就能对上「哪次提交、哪天编的」；对不上就是被
+	 * oledmatrix.exe，查一下就能对上「哪个版本、哪天编的」；对不上就是被
 	 * 重新编过的。
 	 *
 	 * 特意用 char[] 而不是 QStringLiteral：后者在 Windows 上编成 UTF-16，
 	 * 每字符夹两个字节，普通的 strings 只扫 8 位，扫不出来。纯 ASCII 才
 	 * 是一搜就有。这也是唯一一处会把构建信息带进二进制的地方，别删。 */
 	static const char kBuildStamp[] =
-	        "zhangwtee/oledmatrix " OMX_GIT_COMMIT " " OMX_BUILD_DATE;
+	        "zhangwtee/oledmatrix v" OMX_VERSION " " OMX_BUILD_DATE;
 	app.setProperty("oledmatrix.build", QString::fromLatin1(kBuildStamp));
 
 	/* 强制用 Fusion 风格 + 浅色调色板。
